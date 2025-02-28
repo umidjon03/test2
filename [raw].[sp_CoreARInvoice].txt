@@ -1,0 +1,1900 @@
+/****** Object:  StoredProcedure [raw].[sp_CoreARInvoice]    Script Date: 8/16/2023 1:22:33 PM ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+
+ALTER PROCEDURE [raw].[sp_CoreARInvoice]
+AS
+
+/**--HEADER(BEGIN)
+=============================================================================== 
+Object:     PROCEDURE
+Type:       Internal
+Name:       [raw].[sp_CoreARInvoice]
+Version:    1.0
+Status:     Current
+Created:    Unknown
+Author:     Unknown 
+Owner:      Covia Corp
+-------------------------------------------------------------------------------
+DESCRIPTION: 
+    --Come up with a description --
+
+EXECUTION:
+    EXEC [raw].[sp_CoreARInvoice]
+
+STATUS:
+    Current
+
+REMARKS: 
+
+HISTORY:
+
+ -------------------------------------------------------
+	Mar-05-2020 - Baerson, Ron - Added code for snapshot date to CONVERT FROM UTC time to EST
+								   - Added AccountingCurrencyKey AND RegionalCurrencyKey
+	Mar-10-2020 - Baerson, Ron - Added UPDATE for exchange rates
+	Mar-12-2020 - Baerson, Ron - SET to use OPEN_AMOUNT_CALC, INVOICE_AMOUNT_Calc to remove duplicates VALUES due to partitial payments.
+	Mar-18-2020 - Baerson, Ron - Commented out truncate because we are retaining history for customer payments 
+	Mar-19-2020 - Baerson, Ron - Updated code to move all past due amounts less than zero to current per Dana/Rafa
+	Mar-20-2020 - Baerson, Ron - Added Invoice Line No to handle duplicate records
+	Mar-23-2020 - Baerson, Ron - Added Cash ON Account/Unapplied Cash FROM AR Snapshot for IFS
+	Mar-24-2020 - Baerson, Ron - Added ARInvoiceLineKey, add aging for IFS Credits per Dana
+	Mar-26-2020 - Baerson, Ron - Added InvoiceDate AND DueDate AS keys for ARInvoiceLineKey, updated PROCEDURE to account for records in snapshot AND not in customer payment
+	May-19-2020 - Baerson, Ron - Add step to sync up AND remove duplicates for IFS (DataForestID = 20_104)
+	Jun-09-2020 - Baerson, Ron - Added step to load FROM "Not Paid" table Data Forest 20_104 (IFS)
+	Jun-17-2020 - Baerson, Ron - Filtered AR Snapshot to use most recent snapshot
+	Jun-24-2020 - Baerson, Ron - Added RecordSource field
+	Jul-02-2020 - Michaud, Nicole- Added the CUPOA UPDATE for the balance fields 
+	Jul-15-2020 - Baerson, Ron - Added LastUpdateDate
+	Jul-29-2020 - Baerson, Ron - Added combined table
+	Jan-15-2021 - R. LaRochelle - Fix Segment & END Market logic
+	2023-04-03 - Haider, Syed - Adding Error AND Tracking process AND added Documentation
+	2023-04-17 - Linden, Karen - Fixed the Bkeys
+	2023-05-23 - Bennett, Andrew - added CustomerBkey/LegalEntityBKey to EXCEPT query FROM [T_20_109_1_CustomerPaymentCombined] so that the EXCEPT would have same number of fields AND not fail
+	2023-06-13 - Basch, Emily - Wrap ISNULL Around Line 439 for divide by zero
+	2023-07-03 - Linden, Karen - Cloud Deploy - 109
+===============================================================================
+**/--HEADER(END)
+
+SET NOCOUNT ON;
+
+BEGIN TRY  
+
+	DECLARE @BatchDescription VARCHAR(50)
+	       ,@NewLogID BIGINT
+          
+    SET @BatchDescription = OBJECT_NAME(@@PROCID)
+        -- Description of the different type of Batch that could be processed
+    
+    EXEC stage.Process_ProcessLog_Insert 
+        @BatchDescription, 
+        @NewLogID OUTPUT
+        -- INSERT Records INTO table Master_ent_ProcessLog
+
+-- add to combined table
+TRUNCATE TABLE  [store].[T_20_109_1_CustomerPaymentCombined]
+
+INSERT INTO [store].[T_20_109_1_CustomerPaymentCombined] with (tablockx)
+           ([COMPANY]
+           ,[SITE_CODE]
+           ,[SITE_NAME]
+           ,[ORDER_TYPE]
+           ,[ORDER_NO]
+           ,[SHIPMENT_NO]
+           ,[CUSTOMER_PO_NO]
+           ,[ORDER_WANTED_DATE]
+           ,[ADDR1]
+           ,[ADDR2]
+           ,[ADDR3]
+           ,[ADDR4]
+           ,[ADDR5]
+           ,[SERIES_ID]
+           ,[INVOICE_NO]
+           ,[INVOICE_ID]
+           ,[CUSTOMER_NO]
+           ,[CUSTOMER_NAME]
+           ,[PAYER_IDENTITY]
+           ,[INVOICE_PAY_TERM]
+           ,[INV_PAY_TERM_DESC]
+           ,[CUSTOMER_PAY_TERM]
+           ,[CUSOTMER_PAY_TERM_DESC]
+           ,[INVOICE_DATE]
+           ,[INV_SEND_DATE]
+           ,[DUE_DATE]
+           ,[INV_VOUCHER_TYPE]
+           ,[INV_VOUCHER_NO]
+           ,[CURRENCY]
+           ,[INVOICE_AMOUNT]
+           ,[OPEN_AMOUNT]
+           ,[METHOD_OF_INV_DELIVERY]
+           ,[INVOICE_STATUS]
+           ,[RELATED_DEBIT_INV_SEIRES]
+           ,[RELATED_DEBIT_INV_NO]
+           ,[PHYSICAL_SHIP_DATE]
+           ,[SIC_CODE]
+           ,[SALESMAN_CODE]
+           ,[SALESMAN_NAME]
+           ,[DEF_PAY_METHOD]
+           ,[OTHER_PAYEE_ID]
+           ,[OTHER_PAYEE_NAME]
+           ,[ORDER_ENTERED_DATE]
+           ,[CONFIRM_DELIVERY_EXIST]
+           ,[DELAY_COGS_EXIST]
+           ,[PAYMENT_VOUCHER_TYPE]
+           ,[PAYMENT_VOUCHER_NO]
+           ,[PAID_AMOUNT]
+           ,[PAY_DATE]
+           ,[PAYMENT_TYPE_CODE]
+           ,[DATAFOREST_ID]
+           ,[OPEN_AMOUNT_CALC]
+           ,[INVOICE_AMOUNT_CALC]
+           ,[VOUCHER_DATE]
+           ,[REGION_CODE]
+           ,[SNAPSHOTDATE]
+           ,[RecordSource])
+SELECT [COMPANY]
+      ,[SITE_CODE]
+      ,[SITE_NAME]
+      ,[ORDER_TYPE]
+      ,[ORDER_NO]
+      ,[SHIPMENT_NO]
+      ,[CUSTOMER_PO_NO]
+      ,[ORDER_WANTED_DATE]
+      ,[ADDR1]
+      ,[ADDR2]
+      ,[ADDR3]
+      ,[ADDR4]
+      ,[ADDR5]
+      ,[SERIES_ID]
+      ,[INVOICE_NO]
+      ,[INVOICE_ID]
+      ,[CUSTOMER_NO]
+      ,[CUSTOMER_NAME]
+      ,[PAYER_IDENTITY]
+      ,[INVOICE_PAY_TERM]
+      ,[INV_PAY_TERM_DESC]
+      ,[CUSTOMER_PAY_TERM]
+      ,[CUSOTMER_PAY_TERM_DESC]
+      ,[INVOICE_DATE]
+      ,[INV_SEND_DATE]
+      ,[DUE_DATE]
+      ,[INV_VOUCHER_TYPE]
+      ,[INV_VOUCHER_NO]
+      ,[CURRENCY]
+      ,[INVOICE_AMOUNT]
+      ,[OPEN_AMOUNT]
+      ,[METHOD_OF_INV_DELIVERY]
+      ,[INVOICE_STATUS]
+      ,[RELATED_DEBIT_INV_SEIRES]
+      ,[RELATED_DEBIT_INV_NO]
+      ,[PHYSICAL_SHIP_DATE]
+      ,[SIC_CODE]
+      ,[SALESMAN_CODE]
+      ,[SALESMAN_NAME]
+      ,[DEF_PAY_METHOD]
+      ,[OTHER_PAYEE_ID]
+      ,[OTHER_PAYEE_NAME]
+      ,[ORDER_ENTERED_DATE]
+      ,[CONFIRM_DELIVERY_EXIST]
+      ,[DELAY_COGS_EXIST]
+      ,[PAYMENT_VOUCHER_TYPE]
+      ,[PAYMENT_VOUCHER_NO]
+      ,SUM([PAID_AMOUNT]) AS [PAID_AMOUNT]
+      ,[PAY_DATE]
+      ,[PAYMENT_TYPE_CODE]
+      ,[DATAFOREST_ID]
+      ,SUM([OPEN_AMOUNT_CALC]) AS [OPEN_AMOUNT_CALC]
+      ,SUM([INVOICE_AMOUNT_CALC]) AS [INVOICE_AMOUNT_CALC]
+      ,[VOUCHER_DATE]
+      ,[REGION_CODE]
+      ,[SNAPSHOTDATE]
+      ,[RecordSource]
+  FROM [store].[T_20_109_1_CustomerPayment] with (nolock)
+  WHERE [SERIES_ID] <> 'CI'
+ GROUP BY [COMPANY]
+      ,[SITE_CODE]
+      ,[SITE_NAME]
+      ,[ORDER_TYPE]
+      ,[ORDER_NO]
+      ,[SHIPMENT_NO]
+      ,[CUSTOMER_PO_NO]
+      ,[ORDER_WANTED_DATE]
+      ,[ADDR1]
+      ,[ADDR2]
+      ,[ADDR3]
+      ,[ADDR4]
+      ,[ADDR5]
+      ,[SERIES_ID]
+      ,[INVOICE_NO]
+      ,[INVOICE_ID]
+      ,[CUSTOMER_NO]
+      ,[CUSTOMER_NAME]
+      ,[PAYER_IDENTITY]
+      ,[INVOICE_PAY_TERM]
+      ,[INV_PAY_TERM_DESC]
+      ,[CUSTOMER_PAY_TERM]
+      ,[CUSOTMER_PAY_TERM_DESC]
+      ,[INVOICE_DATE]
+      ,[INV_SEND_DATE]
+      ,[DUE_DATE]
+      ,[INV_VOUCHER_TYPE]
+      ,[INV_VOUCHER_NO]
+      ,[CURRENCY]
+      ,[INVOICE_AMOUNT]
+      ,[OPEN_AMOUNT]
+      ,[METHOD_OF_INV_DELIVERY]
+      ,[INVOICE_STATUS]
+      ,[RELATED_DEBIT_INV_SEIRES]
+      ,[RELATED_DEBIT_INV_NO]
+      ,[PHYSICAL_SHIP_DATE]
+      ,[SIC_CODE]
+      ,[SALESMAN_CODE]
+      ,[SALESMAN_NAME]
+      ,[DEF_PAY_METHOD]
+      ,[OTHER_PAYEE_ID]
+      ,[OTHER_PAYEE_NAME]
+      ,[ORDER_ENTERED_DATE]
+      ,[CONFIRM_DELIVERY_EXIST]
+      ,[DELAY_COGS_EXIST]
+      ,[PAYMENT_VOUCHER_TYPE]
+      ,[PAYMENT_VOUCHER_NO]
+      ,[PAY_DATE]
+      ,[PAYMENT_TYPE_CODE]
+      ,[DATAFOREST_ID]
+      ,[VOUCHER_DATE]
+      ,[REGION_CODE]
+      ,[SNAPSHOTDATE]
+      ,[RecordSource]
+
+DECLARE @Today date
+SET @Today = CONVERT(datetimeoffset, SYSDATETIMEOFFSET()) AT TIME ZONE 'Eastern Standard Time'
+
+-- This is used to configure Snap Shot
+DECLARE @SnapShotDate date
+SET @SnapShotDate = DateAdd(d,-1,CONVERT(datetimeoffset, SYSDATETIMEOFFSET()) AT TIME ZONE 'Eastern Standard Time') --GetDate()-1
+
+/* ----------------------------------------
+ INSERT records FROM "Not Paid" table Data Forest 20_109 (IFS)
+---------------------------------------- */
+MERGE INTO [store].[T_20_109_1_CustomerPaymentCombined] AS Target
+USING 
+	(SELECT [CustPaymentID]
+		  ,[COMPANY]
+		  ,[SITE_CODE]
+		  ,[SITE_NAME]
+		  ,[ORDER_TYPE]
+		  ,[ORDER_NO]
+		  ,[SHIPMENT_NO]
+		  ,[CUSTOMER_PO_NO]
+		  ,[ORDER_WANTED_DATE]
+		  ,[ADDR1]
+		  ,[ADDR2]
+		  ,[ADDR3]
+		  ,[ADDR4]
+		  ,[ADDR5]
+		  ,[SERIES_ID]
+		  ,[INVOICE_NO]
+		  ,[INVOICE_ID]
+		  ,[CUSTOMER_NO]
+		  ,[CUSTOMER_NAME]
+		  ,[PAYER_IDENTITY]
+		  ,[INVOICE_PAY_TERM]
+		  ,[INV_PAY_TERM_DESC]
+		  ,[CUSTOMER_PAY_TERM]
+		  ,[CUSOTMER_PAY_TERM_DESC]
+		  ,[INVOICE_DATE]
+		  ,[INV_SEND_DATE]
+		  ,[DUE_DATE]
+		  ,[INV_VOUCHER_TYPE]
+		  ,[INV_VOUCHER_NO]
+		  ,[CURRENCY]
+		  ,[INVOICE_AMOUNT]
+		  ,[OPEN_AMOUNT]
+		  ,[METHOD_OF_INV_DELIVERY]
+		  ,[INVOICE_STATUS]
+		  ,[RELATED_DEBIT_INV_SEIRES]
+		  ,[RELATED_DEBIT_INV_NO]
+		  ,[PHYSICAL_SHIP_DATE]
+		  ,[SIC_CODE]
+		  ,[SALESMAN_CODE]
+		  ,[SALESMAN_NAME]
+		  ,[DEF_PAY_METHOD]
+		  ,[OTHER_PAYEE_ID]
+		  ,[OTHER_PAYEE_NAME]
+		  ,[ORDER_ENTERED_DATE]
+		  ,[CONFIRM_DELIVERY_EXIST]
+		  ,[DELAY_COGS_EXIST]
+		  ,[PAYMENT_VOUCHER_TYPE]
+		  ,[PAYMENT_VOUCHER_NO]
+		  ,[PAID_AMOUNT]
+		  ,[PAY_DATE]
+		  ,[PAYMENT_TYPE_CODE]
+		  ,[DATAFOREST_ID]
+		  ,[OPEN_AMOUNT_CALC]
+		  ,[INVOICE_AMOUNT_CALC]
+		  ,[VOUCHER_DATE]
+		  ,[REGION_CODE]
+		  ,[SNAPSHOTDATE]
+		  ,[PlantBKey]
+	  FROM [store].[T_20_109_1_CustomerPaymentNotPaid]
+	  WHERE [SERIES_ID] <> 'CI') AS Source ON Target.COMPANY = Source.COMPANY 
+	AND Target.PlantBKey = Source.PlantBKey
+	AND Target.INVOICE_NO = Source.INVOICE_NO 
+    AND Target.INVOICE_ID = Source.INVOICE_ID 
+    AND Target.INVOICE_PAY_TERM = Source.INVOICE_PAY_TERM
+	AND Target.INVOICE_DATE = Source.INVOICE_DATE
+WHEN NOT MATCHED THEN 
+INSERT ([COMPANY]
+      ,[SITE_CODE]
+      ,[SITE_NAME]
+      ,[ORDER_TYPE]
+      ,[ORDER_NO]
+      ,[SHIPMENT_NO]
+      ,[CUSTOMER_PO_NO]
+      ,[ORDER_WANTED_DATE]
+      ,[ADDR1]
+      ,[ADDR2]
+      ,[ADDR3]
+      ,[ADDR4]
+      ,[ADDR5]
+      ,[SERIES_ID]
+      ,[INVOICE_NO]
+      ,[INVOICE_ID]
+      ,[CUSTOMER_NO]
+      ,[CUSTOMER_NAME]
+      ,[PAYER_IDENTITY]
+      ,[INVOICE_PAY_TERM]
+      ,[INV_PAY_TERM_DESC]
+      ,[CUSTOMER_PAY_TERM]
+      ,[CUSOTMER_PAY_TERM_DESC]
+      ,[INVOICE_DATE]
+      ,[INV_SEND_DATE]
+      ,[DUE_DATE]
+      ,[INV_VOUCHER_TYPE]
+      ,[INV_VOUCHER_NO]
+      ,[CURRENCY]
+      ,[INVOICE_AMOUNT]
+      ,[OPEN_AMOUNT]
+      ,[METHOD_OF_INV_DELIVERY]
+      ,[INVOICE_STATUS]
+      ,[RELATED_DEBIT_INV_SEIRES]
+      ,[RELATED_DEBIT_INV_NO]
+      ,[PHYSICAL_SHIP_DATE]
+      ,[SIC_CODE]
+      ,[SALESMAN_CODE]
+      ,[SALESMAN_NAME]
+      ,[DEF_PAY_METHOD]
+      ,[OTHER_PAYEE_ID]
+      ,[OTHER_PAYEE_NAME]
+      ,[ORDER_ENTERED_DATE]
+      ,[CONFIRM_DELIVERY_EXIST]
+      ,[DELAY_COGS_EXIST]
+      ,[PAYMENT_VOUCHER_TYPE]
+      ,[PAYMENT_VOUCHER_NO]
+      ,[PAID_AMOUNT]
+      ,[PAY_DATE]
+      ,[PAYMENT_TYPE_CODE]
+      ,[DATAFOREST_ID]
+      ,[OPEN_AMOUNT_CALC]
+      ,[INVOICE_AMOUNT_CALC]
+      ,[VOUCHER_DATE]
+      ,[REGION_CODE]
+      ,[SNAPSHOTDATE]
+      ,[RecordSource]
+)
+VALUES (Source.[COMPANY]
+      ,Source.[SITE_CODE]
+      ,Source.[SITE_NAME]
+      ,Source.[ORDER_TYPE]
+      ,Source.[ORDER_NO]
+      ,Source.[SHIPMENT_NO]
+      ,Source.[CUSTOMER_PO_NO]
+      ,Source.[ORDER_WANTED_DATE]
+      ,Source.[ADDR1]
+      ,Source.[ADDR2]
+      ,Source.[ADDR3]
+      ,Source.[ADDR4]
+      ,Source.[ADDR5]
+      ,Source.[SERIES_ID]
+      ,Source.[INVOICE_NO]
+      ,Source.[INVOICE_ID]
+      ,Source.[CUSTOMER_NO]
+      ,Source.[CUSTOMER_NAME]
+      ,Source.[PAYER_IDENTITY]
+      ,Source.[INVOICE_PAY_TERM]
+      ,Source.[INV_PAY_TERM_DESC]
+      ,Source.[CUSTOMER_PAY_TERM]
+      ,Source.[CUSOTMER_PAY_TERM_DESC]
+      ,Source.[INVOICE_DATE]
+      ,Source.[INV_SEND_DATE]
+      ,Source.[DUE_DATE]
+      ,Source.[INV_VOUCHER_TYPE]
+      ,Source.[INV_VOUCHER_NO]
+      ,Source.[CURRENCY]
+      ,Source.[INVOICE_AMOUNT]
+      ,Source.[OPEN_AMOUNT]
+      ,Source.[METHOD_OF_INV_DELIVERY]
+      ,Source.[INVOICE_STATUS]
+      ,Source.[RELATED_DEBIT_INV_SEIRES]
+      ,Source.[RELATED_DEBIT_INV_NO]
+      ,Source.[PHYSICAL_SHIP_DATE]
+      ,Source.[SIC_CODE]
+      ,Source.[SALESMAN_CODE]
+      ,Source.[SALESMAN_NAME]
+      ,Source.[DEF_PAY_METHOD]
+      ,Source.[OTHER_PAYEE_ID]
+      ,Source.[OTHER_PAYEE_NAME]
+      ,Source.[ORDER_ENTERED_DATE]
+      ,Source.[CONFIRM_DELIVERY_EXIST]
+      ,Source.[DELAY_COGS_EXIST]
+      ,Source.[PAYMENT_VOUCHER_TYPE]
+      ,Source.[PAYMENT_VOUCHER_NO]
+      ,Source.[PAID_AMOUNT]
+      ,Source.[PAY_DATE]
+      ,Source.[PAYMENT_TYPE_CODE]
+      ,Source.[DATAFOREST_ID]
+      ,Source.[OPEN_AMOUNT_CALC]
+      ,Source.[INVOICE_AMOUNT_CALC]
+      ,Source.[VOUCHER_DATE]
+      ,Source.[REGION_CODE]
+      ,Source.[SNAPSHOTDATE]
+      ,'CustomerPaymentNotPaid' --[RecordSource]
+	  );
+
+/* ----------------------------------------
+ UPDATE to SET open amount due to duplicate VALUES in the source data for Data Forest 20_109 (IFS)
+---------------------------------------- */
+
+IF OBJECT_ID('TempCustAR109') IS NOT NULL
+BEGIN
+    DROP TABLE TempCustAR109
+END
+
+
+;With CTE AS (
+SELECT CustPaymentID, 
+	INVOICE_NO, 
+	PAYMENT_VOUCHER_NO, 
+	PAY_DATE, 
+	PAID_AMOUNT, 
+	INVOICE_AMOUNT
+	, OPEN_AMOUNT
+	, OPEN_AMOUNT_CALC
+	, ROW_NUMBER()Over(Partition By CUSTOMER_NO, COMPANY, INVOICE_NO ORDER BY CONVERT(NVARCHAR(50),CUSTOMER_NO), CONVERT(NVARCHAR(50),COMPANY), CONVERT(NVARCHAR(50),INVOICE_NO), CONVERT(date,PAY_DATE) desc, CONVERT(NVARCHAR(50),PAYMENT_VOUCHER_NO)) AS PaymentLineNo
+	, SUM(PAID_AMOUNT)Over(Partition By INVOICE_NO, COMPANY, CUSTOMER_NO ORDER BY CONVERT(NVARCHAR(50),CUSTOMER_NO), CONVERT(NVARCHAR(50),COMPANY), CONVERT(NVARCHAR(50),INVOICE_NO)) AS TotalPaidAmount
+	, COUNT(INVOICE_NO)Over(Partition By INVOICE_NO, COMPANY, CUSTOMER_NO ORDER BY CONVERT(NVARCHAR(50),INVOICE_NO), CONVERT(NVARCHAR(50),COMPANY), CONVERT(NVARCHAR(50),CUSTOMER_NO)) AS InvoiceCount
+	, COMPANY
+	, SITE_CODE
+	, INVOICE_ID
+	, CUSTOMER_NO
+	, PAYER_IDENTITY
+	, CONVERT(date,PAY_DATE) AS PayDateDate
+	, CONVERT(date,DUE_DATE) AS DueDateDate
+	, COALESCE(CONVERT(date,VOUCHER_DATE),'') AS VoucherDate
+	, TRIM(SIC_Code) AS SICCode
+	, TRIM(SALESMAN_CODE) AS SalesmanCode
+	, PAID_AMOUNT AS PaidAmount
+	, SERIES_ID
+	, RecordSource
+FROM [store].[T_20_109_1_CustomerPaymentCombined] AS fact
+WHERE 1=1 
+)
+
+SELECT * INTO TempCustAR109 FROM cte
+CREATE NONClustered columnstore index CI_Temp1 ON TempCustAR109 (CustPaymentID)
+
+
+UPDATE fact
+SET OPEN_AMOUNT_CALC = CASE WHEN cte.PaymentLineNo =1 THEN fact.OPEN_AMOUNT ELSE 0.00 END 
+   ,INVOICE_AMOUNT_CALC = Round(fact.INVOICE_AMOUNT/ NULLIF(cte.InvoiceCount,0),3) --2023-06-13
+
+FROM [store].[T_20_109_1_CustomerPaymentCombined] AS fact
+	INNER JOIN  TempCustAR109 AS cte 
+	ON cte.CustPaymentID = fact.CustPaymentID
+
+/* ----------------------------------------
+ CREATE temp table for snapshot to get the most current snapshot
+ At month-END there may be 2 snapshots until the month is closed
+---------------------------------------- */
+IF OBJECT_ID('#TempCustARSnapShot109') IS NOT NULL
+BEGIN
+    DROP TABLE #TempCustARSnapShot109
+END
+
+SELECT CONVERT(NVARCHAR(100),[COMPANY]) AS [COMPANY]
+      ,CONVERT(NVARCHAR(100),[CUSTOMER_ID]) AS [CUSTOMER_ID]
+      ,CONVERT(NVARCHAR(100),[INVOICE_NO]) AS [INVOICE_NO]
+      ,CONVERT(NVARCHAR(100),[SERIES_ID]) AS [SERIES_ID]
+      ,CONVERT(date,[INVOICE_DATE]) AS [INVOICE_DATE]
+      ,CONVERT(date,[DUE_DATE]) AS [DUE_DATE]
+      ,CONVERT(NVARCHAR(100),[CURRENCY]) AS [CURRENCY]
+      ,Max([ANALYSIS_DATE]) AS [ANALYSIS_DATE]
+      ,Max([LASTMODIFIED]) AS [LASTMODIFIED]
+	  ,'ARSnapshot' AS RecordSource
+	  ,CustomerBKey
+	  ,LegalEntityBKey
+INTO #TempCustARSnapShot109
+  FROM [store].[T_20_109_1_CustomerARSnapshot]
+GROUP BY CONVERT(NVARCHAR(100),[COMPANY])
+      ,CONVERT(NVARCHAR(100),[CUSTOMER_ID])
+      ,CONVERT(NVARCHAR(100),[INVOICE_NO])
+      ,CONVERT(NVARCHAR(100),[SERIES_ID])
+      ,CONVERT(date,[INVOICE_DATE])
+      ,CONVERT(date,[DUE_DATE])
+      ,CONVERT(NVARCHAR(100),[CURRENCY])
+	  ,CustomerBKey
+	  ,LegalEntityBKey
+
+CREATE NONCLUSTERED COLUMNSTORE INDEX NCCI_TempCustARSnapShot109 
+ON #TempCustARSnapShot109 (COMPANY, CUSTOMER_ID, INVOICE_NO, SERIES_ID, INVOICE_DATE, DUE_DATE, CURRENCY)
+
+/* ----------------------------------------
+ Add Cash ON-Account/Unapplied Cash to AR Detail FROM Snapshot
+---------------------------------------- */
+
+-- UPDATE Site Code FROM customer payment to snapshot
+UPDATE snap
+SET SITE_CODE = pay.SITE_CODE
+FROM [store].[T_20_109_1_CustomerARSnapshot] AS snap
+	INNER JOIN  (SELECT distinct COMPANY, CUSTOMER_NO, SITE_CODE, INVOICE_NO, SERIES_ID, INVOICE_DATE, DUE_DATE, LegalEntityBKey, CustomerBKey
+			FROM [store].[T_20_109_1_CustomerPaymentCombined]) AS pay 
+					ON pay.LegalEntityBKey = snap.LegalEntityBKey
+					AND pay.CustomerBKey = snap.CustomerBKey
+					AND pay.INVOICE_NO = snap.INVOICE_NO 
+					AND pay.SERIES_ID = snap.SERIES_ID 
+					AND CONVERT(Date,pay.INVOICE_DATE) = CONVERT(Date,snap.INVOICE_DATE)
+					AND CONVERT(Date,pay.DUE_DATE) = CONVERT(Date,snap.DUE_DATE)
+
+-- INSERT record with max analysis date because there can be multiple dates in the AR Snapshot file
+DELETE FROM [store].[T_20_109_1_CustomerPaymentCombined] WHERE SERIES_ID IN ('CUPOA') 
+
+
+/* ---------------------------------------------
+ Identify records in snapshot that are missing FROM customer payment
+--------------------------------------------- */
+
+-- CREATE temp table of missing records
+IF OBJECT_ID('#TempMissingARInvoices') IS NOT NULL
+BEGIN
+    DROP TABLE #TempMissingARInvoices
+END
+
+SELECT COMPANY, '' AS SITE_CODE, 
+	CUSTOMER_ID, 
+	INVOICE_NO, 
+	SERIES_ID, 
+	INVOICEDATE, 
+	DUEDATE,
+	CONVERT(NVARCHAR(50),TRIM(fact.INVOICE_NO)) +'|'+ CONVERT(NVARCHAR(50),TRIM(fact.SERIES_ID))  
+		 + '|' + CONVERT(NVARCHAR(50),TRIM(fact.CUSTOMER_ID)) 
+		 + '|' + CONVERT(NVARCHAR(8),CONVERT(date,fact.INVOICEDATE),112) 
+		 + '|' + CONVERT(NVARCHAR(8),CONVERT(date,fact.DUEDATE),112) AS ARInvoiceLineKey
+	,'ARSnapshot' AS RecordSource
+INTO #TempMissingARInvoices
+FROM (
+SELECT snap.COMPANY, 
+	snap.CUSTOMER_ID, 
+	snap.INVOICE_NO, 
+	snap.SERIES_ID, 
+	CONVERT(date,snap.INVOICE_DATE) AS InvoiceDate, 
+	CONVERT(date,snap.DUE_DATE) AS DueDate,
+	snap.LegalEntityBKey,
+	snap.CustomerBKey
+FROM [store].[T_20_109_1_CustomerARSnapshot] AS snap with (nolock)
+	INNER JOIN  #TempCustARSnapShot109 AS temp 
+		ON snap.LegalEntityBKey = temp.LegalEntityBKey
+		AND snap.CustomerBKey = temp.CustomerBKey
+		AND snap.INVOICE_NO = temp.INVOICE_NO
+		AND snap.SERIES_ID = temp.SERIES_ID 
+		AND CONVERT(date,snap.INVOICE_DATE) = temp.INVOICE_DATE 
+		AND CONVERT(date,snap.DUE_DATE) = temp.DUE_DATE
+		AND snap.ANALYSIS_DATE = temp.ANALYSIS_DATE
+WHERE snap.SERIES_ID NOT IN ('CUPOA')
+except
+SELECT COMPANY
+	, CUSTOMER_NO
+	, INVOICE_NO
+	, SERIES_ID
+	, CONVERT(date,INVOICE_DATE) AS InvoiceDate
+	, CONVERT(date,DUE_DATE) AS DueDate 
+	,LegalEntityBKey		-- added LegalEntityBKey to this query so it would not fail - 20230523 - abennett
+	,CustomerBKey			-- added customerBkey to this query so it would not fail - 20230523 - abennett
+FROM [store].[T_20_109_1_CustomerPaymentCombined] with (nolock)
+WHERE SERIES_ID NOT IN ('CUPOA'))
+AS fact
+
+CREATE clustered index CI_TempMissingARInvoices ON #TempMissingARInvoices (ARInvoiceLineKey)
+
+;WITH CTE AS
+
+(
+SELECT fact.[COMPANY]
+	  ,fact.[CUSTOMER_ID]
+      ,fact.[SITE_CODE]
+      ,fact.[SERIES_ID]
+      ,fact.[INVOICE_NO]
+      ,fact.[INVOICE_DATE]
+      ,fact.[DUE_DATE]
+      ,fact.[CURRENCY]
+      ,fact.[INVOICE_AMOUNT]
+      ,fact.[OPEN_AMOUNT]
+      ,fact.[ANALYSIS_DATE] 
+	  ,ROW_NUMBER()Over(Partition By fact.COMPANY
+	  , fact.CUSTOMER_ID
+	  , fact.INVOICE_NO
+	  , fact.SERIES_ID
+	  , fact.INVOICE_DATE
+	  , fact.ANALYSIS_DATE
+		ORDER BY fact.COMPANY, fact.CUSTOMER_ID, fact.INVOICE_NO, fact.SERIES_ID, fact.INVOICE_DATE, fact.ANALYSIS_DATE desc) AS rownum
+	  , fact.RecordSource
+  FROM [store].[T_20_109_1_CustomerARSnapshot] AS fact
+	INNER JOIN  #TempMissingARInvoices AS missing 
+		ON CONVERT(NVARCHAR(50),TRIM(fact.INVOICE_NO)) +'|'+ CONVERT(NVARCHAR(50),TRIM(fact.SERIES_ID))  +'|'+ CONVERT(NVARCHAR(50),TRIM(fact.CUSTOMER_ID)) 
+		 + '|' + CONVERT(NVARCHAR(8),CONVERT(date,fact.INVOICE_DATE),112) + '|' + CONVERT(NVARCHAR(8),CONVERT(date,fact.DUE_DATE),112)
+		 = missing.ARInvoiceLineKey
+	INNER JOIN  #TempCustARSnapShot109 AS temp 
+		ON fact.LegalEntityBKey = temp.LegalEntityBKey
+		AND fact.CustomerBKey = temp.CustomerBKey
+		AND fact.INVOICE_NO = temp.INVOICE_NO
+		AND fact.SERIES_ID = temp.SERIES_ID 
+		AND CONVERT(date,fact.INVOICE_DATE) = temp.INVOICE_DATE 
+		AND CONVERT(date,fact.DUE_DATE) = temp.DUE_DATE
+		AND fact.ANALYSIS_DATE = temp.ANALYSIS_DATE
+)
+
+
+INSERT INTO [store].[T_20_109_1_CustomerPaymentCombined] with (tablockx)
+           ([COMPANY]
+           ,[SITE_CODE]
+           ,[SITE_NAME]
+           ,[ORDER_TYPE]
+           ,[ORDER_NO]
+           ,[SHIPMENT_NO]
+           ,[CUSTOMER_PO_NO]
+           ,[ORDER_WANTED_DATE]
+           ,[ADDR1]
+           ,[ADDR2]
+           ,[ADDR3]
+           ,[ADDR4]
+           ,[ADDR5]
+           ,[SERIES_ID]
+           ,[INVOICE_NO]
+           ,[INVOICE_ID]
+           ,[CUSTOMER_NO]
+           ,[CUSTOMER_NAME]
+           ,[PAYER_IDENTITY]
+           ,[INVOICE_PAY_TERM]
+           ,[INV_PAY_TERM_DESC]
+           ,[CUSTOMER_PAY_TERM]
+           ,[CUSOTMER_PAY_TERM_DESC]
+           ,[INVOICE_DATE]
+           ,[INV_SEND_DATE]
+           ,[DUE_DATE]
+           ,[INV_VOUCHER_TYPE]
+           ,[INV_VOUCHER_NO]
+           ,[CURRENCY]
+           ,[INVOICE_AMOUNT]
+           ,[OPEN_AMOUNT]
+           ,[METHOD_OF_INV_DELIVERY]
+           ,[INVOICE_STATUS]
+           ,[RELATED_DEBIT_INV_SEIRES]
+           ,[RELATED_DEBIT_INV_NO]
+           ,[PHYSICAL_SHIP_DATE]
+           ,[SIC_CODE]
+           ,[SALESMAN_CODE]
+           ,[SALESMAN_NAME]
+           ,[DEF_PAY_METHOD]
+           ,[OTHER_PAYEE_ID]
+           ,[OTHER_PAYEE_NAME]
+           ,[ORDER_ENTERED_DATE]
+           ,[CONFIRM_DELIVERY_EXIST]
+           ,[DELAY_COGS_EXIST]
+           ,[PAYMENT_VOUCHER_TYPE]
+           ,[PAYMENT_VOUCHER_NO]
+           ,[PAID_AMOUNT]
+           ,[PAY_DATE]
+           ,[PAYMENT_TYPE_CODE]
+           ,[DATAFOREST_ID]
+           ,[OPEN_AMOUNT_CALC]
+           ,[INVOICE_AMOUNT_CALC]
+           ,[VOUCHER_DATE]
+           ,[REGION_CODE]
+           ,[SNAPSHOTDATE]
+		   ,[RecordSource])
+SELECT [COMPANY]
+      ,[SITE_CODE]
+      ,NULL AS [SITE_NAME]
+      ,NULL AS [ORDER_TYPE]
+      ,NULL AS [ORDER_NO]
+      ,NULL AS [SHIPMENT_NO]
+      ,NULL AS [CUSTOMER_PO_NO]
+      ,NULL AS [ORDER_WANTED_DATE]
+      ,NULL AS [ADDR1]
+      ,NULL AS [ADDR2]
+      ,NULL AS [ADDR3]
+      ,NULL AS [ADDR4]
+      ,NULL AS [ADDR5]
+      ,[SERIES_ID]
+      ,[INVOICE_NO]
+      ,[INVOICE_NO] AS [INVOICE_ID]
+      ,[CUSTOMER_ID] AS [CUSTOMER_NO]
+      ,NULL AS [CUSTOMER_NAME]
+      ,[CUSTOMER_ID] AS [PAYER_IDENTITY]
+      ,NULL AS [INVOICE_PAY_TERM]
+      ,NULL AS [INV_PAY_TERM_DESC]
+      ,NULL AS [CUSTOMER_PAY_TERM]
+      ,NULL AS [CUSOTMER_PAY_TERM_DESC]
+      ,[INVOICE_DATE]
+      ,NULL AS [INV_SEND_DATE]
+      ,[DUE_DATE]
+      ,NULL AS [INV_VOUCHER_TYPE]
+      ,NULL AS [INV_VOUCHER_NO]
+      ,[CURRENCY]
+      ,[INVOICE_AMOUNT]
+      ,[OPEN_AMOUNT]
+      ,NULL AS [METHOD_OF_INV_DELIVERY]
+      ,NULL AS [INVOICE_STATUS]
+      ,NULL AS [RELATED_DEBIT_INV_SEIRES]
+      ,NULL AS [RELATED_DEBIT_INV_NO]
+      ,NULL AS [PHYSICAL_SHIP_DATE]
+      ,NULL AS [SIC_CODE]
+      ,NULL AS [SALESMAN_CODE]
+      ,NULL AS [SALESMAN_NAME]
+      ,NULL AS [DEF_PAY_METHOD]
+      ,NULL AS [OTHER_PAYEE_ID]
+      ,NULL AS [OTHER_PAYEE_NAME]
+      ,NULL AS [ORDER_ENTERED_DATE]
+      ,NULL AS [CONFIRM_DELIVERY_EXIST]
+      ,NULL AS [DELAY_COGS_EXIST]
+      ,NULL AS [PAYMENT_VOUCHER_TYPE]
+      ,NULL AS [PAYMENT_VOUCHER_NO]
+      ,NULL AS [PAID_AMOUNT]
+      ,NULL AS [PAY_DATE]
+      ,NULL AS [PAYMENT_TYPE_CODE]
+      ,'20_109' AS [DATAFOREST_ID]
+      ,[OPEN_AMOUNT] AS [OPEN_AMOUNT_CALC]
+      ,[INVOICE_AMOUNT] AS [INVOICE_AMOUNT_CALC]
+      ,NULL AS [VOUCHER_DATE]
+      ,NULL AS [REGION_CODE]
+      ,[ANALYSIS_DATE] AS [SNAPSHOTDATE]
+	  ,[RecordSource] AS [RecordSource]
+FROM CTE
+WHERE rownum = 1
+AND SERIES_ID NOT IN ('CUPOA')
+
+-- Remove all unapplied cash with each job run
+DELETE [dbo].[CoreARInvoice] 
+WHERE SeriesReference IN ('CUPOA') AND DataForestID IN ('20_109')
+
+
+/* ----------------------------------------
+ MERGE Data Forest 20_109 (IFS)
+---------------------------------------- */
+MERGE INTO  [dbo].[CoreARInvoice] AS Target
+USING (
+SELECT COALESCE(CONVERT(date,fact.SNAPSHOTDATE),@SnapShotDate) AS SnapShotDate
+	, CONVERT(NVARCHAR(50),fact.INVOICE_NO) AS InvoiceNumber
+	, CONVERT(NVARCHAR(50),fact.INVOICE_ID) AS InvoiceID
+	, ROW_NUMBER()Over(Partition By CONVERT(NVARCHAR(50),TRIM(fact.CUSTOMER_NO)), CONVERT(NVARCHAR(50),TRIM(fact.COMPANY)), CONVERT(NVARCHAR(50),fact.INVOICE_ID)
+		ORDER BY CONVERT(NVARCHAR(50),TRIM(fact.CUSTOMER_NO)), CONVERT(NVARCHAR(50),TRIM(fact.COMPANY)), CONVERT(NVARCHAR(50),fact.INVOICE_ID)
+	, ISNULL(CONVERT(NVARCHAR(50),TRIM(fact.PAYMENT_VOUCHER_NO)),''), ISNULL(CONVERT(date,fact.PAY_DATE ),'')
+	, SUM(CASE WHEN CONVERT(decimal(18,4),fact.PAID_AMOUNT) = 0.00 THEN NULL ELSE CONVERT(decimal(18,4),fact.PAID_AMOUNT) END )
+		) AS InvoiceLineNo
+	, CONVERT(date,fact.INVOICE_DATE) AS InvoiceDate
+	, CONVERT(date,fact.DUE_DATE) AS DueDate
+	, Case WHEN DATEDIFF(day,fact.DUE_DATE,@SnapShotDate) < 0 THEN 0 else DATEDIFF(day,fact.DUE_DATE,@SnapShotDate) END AS DaysPastDue
+	, CASE WHEN DATEDIFF(day,fact.DUE_DATE,@SnapShotDate) <= 0 THEN -1 ELSE 0 END AS ARAgingKey
+	, -1 AS CustomerKey --, ISNULL(dcust.CustomerKey,-1) AS CustomerKey
+	, -1 AS LegalEntityKey --, ISNULL(dlegal.LegalEntityKey,-1) AS LegalEntityKey
+	, -1 AS PlantKey --, ISNULL(dplant.PlantKey,-1) AS PlantKey
+	, -1 AS CurrencyKey --, ISNULL(dcurr.CurrencyKey,-1) AS CurrencyKey
+	, -1 AS CreditManagerKey
+	, -1 AS PaymentTermsKey
+	, -1 AS AccountingCurrencyKey
+	, -1 AS RegionalCurrencyKey
+	, CONVERT(NVARCHAR(50),TRIM(fact.CUSTOMER_NO)) AS CustomerNumber
+	, CONVERT(NVARCHAR(50),TRIM(fact.COMPANY)) AS LegalEntityCode
+	, CONVERT(NVARCHAR(50),TRIM(fact.SITE_CODE)) AS PlantCode
+	, CONVERT(NVARCHAR(50),TRIM(fact.ORDER_NO)) AS OrderNo
+	, CONVERT(NVARCHAR(50),TRIM(fact.ORDER_TYPE)) AS OrderType
+	, CONVERT(NVARCHAR(50),TRIM(fact.PAYER_IDENTITY)) AS PayerNumber
+	, CONVERT(NVARCHAR(50),TRIM(fact.INVOICE_PAY_TERM)) AS InvoicePaymentTerms
+	, CONVERT(NVARCHAR(50),TRIM(fact.INV_VOUCHER_TYPE)) AS InvoiceVoucherType
+	, CONVERT(NVARCHAR(50),TRIM(fact.INV_VOUCHER_NO)) AS InvoiceVoucherNumber
+	, CONVERT(NVARCHAR(50),TRIM(fact.SIC_CODE)) AS SICCode
+	, CONVERT(NVARCHAR(50),TRIM(fact.SALESMAN_CODE)) AS SalesmanCode
+	, CONVERT(NVARCHAR(50),TRIM(fact.CURRENCY)) AS CurrencyCode
+	, CONVERT(NVARCHAR(20),TRIM(fact.DATAFOREST_ID)) AS DataForestID
+	, SUM(CONVERT(decimal(18,4),fact.INVOICE_AMOUNT_CALC)) AS [InvoiceAmount] -- SET to use OPEN_AMOUNT_CALC to remove duplicates VALUES ON partitial payments.
+	, SUM(CASE WHEN CONVERT(decimal(18,4),fact.OPEN_AMOUNT_CALC) = 0.00 THEN NULL ELSE CONVERT(decimal(18,4),fact.OPEN_AMOUNT_CALC) END) AS [OpenAmount] -- SET to use OPEN_AMOUNT_CALC to remove duplicates VALUES ON partitial payments.
+	, SUM(CASE WHEN CONVERT(decimal(18,4),fact.OPEN_AMOUNT) = 0.00 THEN NULL ELSE CONVERT(decimal(18,4),fact.OPEN_AMOUNT) END ) AS [OpenAmountOrg] 
+	, SUM(CASE WHEN CONVERT(decimal(18,4),fact.PAID_AMOUNT) = 0.00 THEN NULL ELSE CONVERT(decimal(18,4),fact.PAID_AMOUNT) END ) AS [PaidAmount]
+	, ISNULL(CONVERT(NVARCHAR(50),TRIM(fact.PAYMENT_VOUCHER_NO)),'') AS [PaymentVoucher]
+	, ISNULL(CONVERT(date,fact.PAY_DATE ),'') AS [PayDate]
+	, ISNULL(CONVERT(date,fact.VOUCHER_DATE) ,'') AS [VoucherDate]
+	, SUM(CASE WHEN DATEDIFF(day,fact.DUE_DATE,@SnapShotDate) <= 0 THEN CONVERT(decimal(18,4),fact.OPEN_AMOUNT_CALC) ELSE NULL END) AS CurrentAmount
+	, CASE WHEN DATEDIFF(day,fact.DUE_DATE,@SnapShotDate) >  0 THEN 1 ELSE NULL END AS PastDueFlag
+	, SUM(CASE WHEN DATEDIFF(day,fact.DUE_DATE,@SnapShotDate) >  0 THEN CONVERT(decimal(18,4),fact.OPEN_AMOUNT_CALC) ELSE NULL END) AS PastDueAmount
+	, SUM(CASE WHEN DATEDIFF(day,fact.DUE_DATE,@SnapShotDate) > 0  AND   DATEDIFF(day,fact.DUE_DATE,@SnapShotDate) <= 30  THEN CONVERT(decimal(18,4),fact.OPEN_AMOUNT_CALC) ELSE  NULL END) AS [PastDueAmount1to30]
+	, SUM(CASE WHEN DATEDIFF(day,fact.DUE_DATE,@SnapShotDate) >= 31  AND DATEDIFF(day,fact.DUE_DATE,@SnapShotDate) <= 60  THEN CONVERT(decimal(18,4),fact.OPEN_AMOUNT_CALC) ELSE  NULL END) AS [PastDueAmount31to60]
+	, SUM(CASE WHEN DATEDIFF(day,fact.DUE_DATE,@SnapShotDate) >= 61  AND DATEDIFF(day,fact.DUE_DATE,@SnapShotDate) <= 90  THEN  CONVERT(decimal(18,4),fact.OPEN_AMOUNT_CALC) ELSE  NULL END) AS [PastDueAmount61to90]
+	, SUM(CASE WHEN DATEDIFF(day,fact.DUE_DATE,@SnapShotDate) >= 91  AND DATEDIFF(day,fact.DUE_DATE,@SnapShotDate) <= 120 THEN CONVERT(decimal(18,4),fact.OPEN_AMOUNT_CALC) ELSE NULL END) AS [PastDueAmount91to120]
+	, SUM(CASE WHEN DATEDIFF(day,fact.DUE_DATE,@SnapShotDate) >= 121 AND DATEDIFF(day,fact.DUE_DATE,@SnapShotDate) <= 180 THEN CONVERT(decimal(18,4),fact.OPEN_AMOUNT_CALC) ELSE NULL END) AS [PastDueAmount121to180]
+	, SUM(CASE WHEN DATEDIFF(day,fact.DUE_DATE,@SnapShotDate) >= 181 AND DATEDIFF(day,fact.DUE_DATE,@SnapShotDate) <= 240 THEN CONVERT(decimal(18,4),fact.OPEN_AMOUNT_CALC) ELSE NULL END) AS [PastDueAmount181to240]
+	, SUM(CASE WHEN DATEDIFF(day,fact.DUE_DATE,@SnapShotDate) >= 241 AND DATEDIFF(day,fact.DUE_DATE,@SnapShotDate) <= 365 THEN CONVERT(decimal(18,4),fact.OPEN_AMOUNT_CALC) ELSE NULL END) AS [PastDueAmount241to365]
+	, SUM(CASE WHEN DATEDIFF(day,fact.DUE_DATE,@SnapShotDate) > 365  THEN CONVERT(decimal(18,4),fact.OPEN_AMOUNT_CALC) ELSE NULL END) AS [PastDueAmount366Plus]
+	, CONVERT(NVARCHAR(50),TRIM(fact.PAYER_IDENTITY)) AS [PayerIdentity]
+	, CONVERT(NVARCHAR(50),TRIM(fact.SERIES_ID)) AS SeriesReference
+	, line.[ARInvoiceLineKey]
+	, fact.[RecordSource]
+	, fact.CustomerBKey
+	, fact.LegalEntityBKey
+FROM [store].[T_20_109_1_CustomerPaymentCombined] AS fact 
+	INNER JOIN  [dbo].[CoreARInvoiceLine]  AS line 
+		ON CONVERT(NVARCHAR(50),TRIM(fact.INVOICE_NO)) 
+	+'|'+ CONVERT(NVARCHAR(50),TRIM(fact.SERIES_ID))  +'|'+ CONVERT(NVARCHAR(50),TRIM(fact.CUSTOMER_NO)) 
+	+'|'+ CONVERT(NVARCHAR(8),CONVERT(date,INVOICE_DATE),112) 
+	+'|'+ CONVERT(NVARCHAR(8),CONVERT(date,DUE_DATE),112)
+		= line.ARInvoiceLineDetail
+WHERE 1=1 
+GROUP BY CONVERT(NVARCHAR(50),fact.INVOICE_NO) 
+	, CONVERT(NVARCHAR(50),fact.INVOICE_ID) 
+	, CONVERT(date,fact.INVOICE_DATE) 
+	, CONVERT(date,fact.DUE_DATE) 
+	, DATEDIFF(day,fact.DUE_DATE,@SnapShotDate)
+	, CASE WHEN DATEDIFF(day,fact.DUE_DATE,@SnapShotDate) <= 0 THEN -1 ELSE 0 END
+	, CONVERT(NVARCHAR(50),TRIM(fact.CUSTOMER_NO)) 
+	, CONVERT(NVARCHAR(50),TRIM(fact.COMPANY)) 
+	, CONVERT(NVARCHAR(50),TRIM(fact.SITE_CODE)) 
+	, CONVERT(NVARCHAR(50),TRIM(fact.ORDER_NO)) 
+	, CONVERT(NVARCHAR(50),TRIM(fact.ORDER_TYPE))
+	, CONVERT(NVARCHAR(50),TRIM(fact.PAYER_IDENTITY)) 
+	, CONVERT(NVARCHAR(50),TRIM(fact.INVOICE_PAY_TERM)) 
+	, CONVERT(NVARCHAR(50),TRIM(fact.INV_VOUCHER_TYPE)) 
+	, CONVERT(NVARCHAR(50),TRIM(fact.INV_VOUCHER_NO)) 
+	, CONVERT(NVARCHAR(50),TRIM(fact.SIC_CODE)) 
+	, CONVERT(NVARCHAR(50),TRIM(fact.SALESMAN_CODE)) 
+	, CONVERT(NVARCHAR(50),TRIM(fact.CURRENCY)) 
+	, CONVERT(NVARCHAR(20),TRIM(fact.DATAFOREST_ID))
+	, ISNULL(CONVERT(NVARCHAR(50),TRIM(fact.PAYMENT_VOUCHER_NO)),'') 
+	, ISNULL(CONVERT(date,fact.PAY_DATE ),'')
+	, ISNULL(CONVERT(date,fact.VOUCHER_DATE),'')
+	, CONVERT(NVARCHAR(50),TRIM(fact.PAYER_IDENTITY))
+	, CASE WHEN DATEDIFF(day,fact.DUE_DATE,@SnapShotDate) >  0 THEN 1 ELSE NULL END
+	, CONVERT(NVARCHAR(50),TRIM(fact.SERIES_ID))
+	, CONVERT(date,fact.SNAPSHOTDATE)
+	, line.[ARInvoiceLineKey]
+	, fact.[RecordSource]
+	, fact.CustomerBKey
+	, fact.LegalEntityBKey
+) AS Source 
+	ON Target.InvoiceID = Source.InvoiceID 
+	AND Target.LegalEntityBKey = Source.LegalEntityBKey 
+	AND Target.CustomerBKey = Source.CustomerBKey
+	AND Target.DataForestID = Source.DataForestID 
+	AND CONVERT(NVARCHAR(50),Target.InvoiceLineNo) = CONVERT(NVARCHAR(50),Source.InvoiceLineNo)
+
+WHEN MATCHED 
+AND ISNULL(Target.InvoiceNumber,'') != ISNULL(Source.InvoiceNumber,'')
+OR ISNULL(Target.InvoiceID,'') != ISNULL(Source.InvoiceID,'')
+OR ISNULL(Target.InvoiceDate,'') != ISNULL(Source.InvoiceDate,'')
+OR ISNULL(Target.DueDate,'') != ISNULL(Source.DueDate,'')
+OR ISNULL(Target.DaysPastDue,0) != ISNULL(Source.DaysPastDue,0)
+OR ISNULL(Target.ARAgingKey,0) != ISNULL(Source.ARAgingKey,0)
+OR ISNULL(Target.CustomerNumber,'') != ISNULL(Source.CustomerNumber,'')
+OR ISNULL(Target.PlantCode,'') != ISNULL(Source.PlantCode,'')
+OR ISNULL(Target.OrderNo,'') != ISNULL(Source.OrderNo,'')
+OR ISNULL(Target.OrderType,'') != ISNULL(Source.OrderType,'')
+OR ISNULL(Target.PayerNumber,'') != ISNULL(Source.PayerNumber,'')
+OR ISNULL(Target.InvoicePaymentTerms,'') != ISNULL(Source.InvoicePaymentTerms,'')
+OR ISNULL(Target.InvoiceVoucherType,'') != ISNULL(Source.InvoiceVoucherType,'')
+OR ISNULL(Target.InvoiceVoucherNumber,'') != ISNULL(Source.InvoiceVoucherNumber,'')
+OR ISNULL(Target.SICCode,'') != ISNULL(Source.SICCode,'')
+OR ISNULL(Target.SalesmanCode,'') != ISNULL(Source.SalesmanCode,'')
+OR ISNULL(Target.CurrencyCode,'') != ISNULL(Source.CurrencyCode,'')
+OR ISNULL(Target.[InvoiceAmount] ,0) != ISNULL(Source.[InvoiceAmount] ,0)
+OR ISNULL(Target.[OpenAmountOrg] ,0) != ISNULL(Source.[OpenAmountOrg] ,0) 
+OR ISNULL(Target.[PaidAmount],0) != ISNULL(Source.[PaidAmount] ,0)
+OR ISNULL(Target.[PaymentVoucher] ,'') != ISNULL(Source.[PaymentVoucher] ,'')
+OR ISNULL(Target.[PayDate] ,'') != ISNULL(Source.[PayDate] ,'')
+OR ISNULL(Target.[VoucherDate] ,'') != ISNULL(Source.[VoucherDate] ,'')
+OR ISNULL(Target.[CurrentAmount],0) != ISNULL(Source.[CurrentAmount] ,0)
+OR ISNULL(Target.[PastDueFlag],0) != ISNULL(Source.[PastDueFlag],0)
+OR ISNULL(Target.[PastDueAmount],0) != ISNULL(Source.[PastDueAmount] ,0)
+OR ISNULL(Target.[PastDueAmount1to30],0) != ISNULL(Source.[PastDueAmount1to30] ,0)
+OR ISNULL(Target.[PastDueAmount31to60],0) != ISNULL(Source.[PastDueAmount31to60] ,0)
+OR ISNULL(Target.[PastDueAmount61to90],0) != ISNULL(Source.[PastDueAmount61to90] ,0)
+OR ISNULL(Target.[PastDueAmount91to120],0) != ISNULL(Source.[PastDueAmount91to120] ,0)
+OR ISNULL(Target.[PastDueAmount121to180],0) != ISNULL(Source.[PastDueAmount121to180] ,0)
+OR ISNULL(Target.[PastDueAmount181to240],0) != ISNULL(Source.[PastDueAmount181to240] ,0)
+OR ISNULL(Target.[PastDueAmount241to365],0) != ISNULL(Source.[PastDueAmount241to365] ,0)
+OR ISNULL(Target.[PastDueAmount366Plus],0) != ISNULL(Source.[PastDueAmount366Plus],0)
+OR ISNULL(Target.[PayerIdentity],'') != ISNULL(Source.PayerIdentity,'')
+OR ISNULL(Target.[SeriesReference],'') != ISNULL(Source.SeriesReference,'')
+OR ISNULL(Target.[ARInvoiceLineKey],0) != ISNULL(Source.[ARInvoiceLineKey],0)
+OR ISNULL(Target.[LastUpdateDate],'') != @Today
+-- update CustomerBkey and LegalEntityBkey on CoreARInvoice - used in downstream joins and causing data issues in model - abennett 20230706
+OR ISNULL(Target.CustomerBkey,'') != ISNULL(Source.CustomerBkey,'')
+OR ISNULL(Target.LegalEntityBkEy,'') != ISNULL(Source.LegalEntityBkEy,'')
+
+THEN UPDATE SET
+	 [SnapShotDate] = @SnapShotDate
+	,[InvoiceNumber] = Source.[InvoiceNumber]
+	,[InvoiceDate] = Source.[InvoiceDate]
+	,[DueDate] = Source.[DueDate]
+	,[DaysPastDue] = Source.[DaysPastDue]
+	,[ARAgingKey] = Source.[ARAgingKey]
+	,[CustomerNumber] = Source.[CustomerNumber]
+	,[PlantCode] = Source.[PlantCode]
+	,[OrderNo] = Source.[OrderNo]
+	,[OrderType] = Source.[OrderType]
+	,[PayerNumber] = Source.[PayerNumber]
+	,[InvoicePaymentTerms] = Source.[InvoicePaymentTerms]
+	,[InvoiceVoucherType] = Source.[InvoiceVoucherType]
+	,[InvoiceVoucherNumber] = Source.[InvoiceVoucherNumber]
+	,[SICCode] = Source.[SICCode]
+	,[SalesmanCode] = Source.[SalesmanCode]
+	,[CurrencyCode] = Source.[CurrencyCode]
+	,[InvoiceAmount]  = Source.[InvoiceAmount] 
+	,[OpenAmount] = Source.[OpenAmount]
+	,[OpenAmountOrg] = Source.[OpenAmountOrg]
+	,[PaidAmount] = Source.[PaidAmount]
+	,[PaymentVoucher] = Source.[PaymentVoucher]
+	,[PayDate] = Source.[PayDate]
+	,[VoucherDate] = Source.[VoucherDate]
+	,[CurrentAmount] = Source.[CurrentAmount]
+	,[PastDueFlag] = Source.[PastDueFlag]
+	,[PastDueAmount] = Source.[PastDueAmount]
+	,[PastDueAmount1to30] = Source.[PastDueAmount1to30]
+	,[PastDueAmount31to60] = Source.[PastDueAmount31to60]
+	,[PastDueAmount61to90] = Source.[PastDueAmount61to90]
+	,[PastDueAmount91to120] = Source.[PastDueAmount91to120]
+	,[PastDueAmount121to180] = Source.[PastDueAmount121to180]
+	,[PastDueAmount181to240] = Source.[PastDueAmount181to240]
+	,[PastDueAmount241to365] = Source.[PastDueAmount241to365]
+	,[PastDueAmount366Plus] = Source.[PastDueAmount366Plus]
+	,[PayerIdentity] = Source.[PayerIdentity]
+	,[SeriesReference] = Source.[SeriesReference]
+	,[ARInvoiceLineKey] = Source.[ARInvoiceLineKey]
+	,[RecordSource] = Source.[RecordSource]
+	-- update CustomerBkey and LegalEntityBkey on CoreARInvoice - used in downstream joins and causing data issues in model - abennett 20230706
+	,CustomerBKey = Source.CustomerBkey
+	,LegalEntityBKey = Source.LegalEntityBkey
+	,[LastUpdateDate] = @Today
+WHEN NOT MATCHED THEN
+INSERT (
+	   [SnapShotDate]	
+	  ,[InvoiceNumber]
+      ,[InvoiceID]
+	  ,[InvoiceLineNo]
+      ,[InvoiceDate]
+      ,[DueDate]
+	  ,[DaysPastDue]
+	  ,[ARAgingKey]
+	  ,[CustomerKey]
+	  ,[LegalEntityKey]
+	  ,[PlantKey]
+	  ,[CurrencyKey]
+	  ,[CreditManagerKey]
+	  ,[PaymentTermsKey]
+      ,[CustomerNumber]
+      ,[LegalEntityCode]
+      ,[PlantCode]
+      ,[OrderNo]
+      ,[OrderType]
+      ,[PayerNumber]
+      ,[InvoicePaymentTerms]
+      ,[InvoiceVoucherType]
+      ,[InvoiceVoucherNumber]
+      ,[SICCode]
+      ,[SalesmanCode]
+      ,[CurrencyCode]
+	  ,[DataForestID]
+	  ,[InvoiceAmount] 
+	  ,[OpenAmount]
+	  ,[OpenAmountOrg]
+	  ,[PaidAmount]
+	  ,[PaymentVoucher]
+	  ,[PayDate]
+	  ,[VoucherDate]
+	  ,[CurrentAmount]
+	  ,[PastDueFlag]
+	  ,[PastDueAmount]
+	  ,[PastDueAmount1to30]
+	  ,[PastDueAmount31to60]
+	  ,[PastDueAmount61to90]
+	  ,[PastDueAmount91to120]
+	  ,[PastDueAmount121to180]
+	  ,[PastDueAmount181to240]
+	  ,[PastDueAmount241to365]
+	  ,[PastDueAmount366Plus]
+	  ,[PayerIdentity]
+	  ,[SeriesReference]
+	  ,[ARInvoiceLineKey]
+	  ,[RecordSource]
+	  ,[LastUpdateDate]
+	  -- update CustomerBkey and LegalEntityBkey on CoreARInvoice - used in downstream joins and causing data issues in model - abennett 20230706
+	  ,CustomerBkey
+	  ,LegalEntityBkey
+
+	  )
+VALUES (
+	   @SnapShotDate
+	  ,Source.[InvoiceNumber]
+      ,Source.[InvoiceID]
+	  ,Source.[InvoiceLineNo]
+      ,Source.[InvoiceDate]
+      ,Source.[DueDate]
+	  ,Source.[DaysPastDue]
+	  ,Source.[ARAgingKey]
+	  ,Source.[CustomerKey]
+	  ,Source.[LegalEntityKey]
+	  ,Source.[PlantKey]
+	  ,Source.[CurrencyKey]
+	  ,Source.[CreditManagerKey]
+	  ,Source.[PaymentTermsKey]
+      ,Source.[CustomerNumber]
+      ,Source.[LegalEntityCode]
+      ,Source.[PlantCode]
+      ,Source.[OrderNo]
+      ,Source.[OrderType]
+      ,Source.[PayerNumber]
+      ,Source.[InvoicePaymentTerms]
+      ,Source.[InvoiceVoucherType]
+      ,Source.[InvoiceVoucherNumber]
+      ,Source.[SICCode]
+      ,Source.[SalesmanCode]
+      ,Source.[CurrencyCode]
+	  ,Source.[DataForestID]
+	  ,Source.[InvoiceAmount] 
+	  ,Source.[OpenAmount]
+	  ,Source.[OpenAmountOrg]
+	  ,Source.[PaidAmount]
+	  ,Source.[PaymentVoucher]
+	  ,Source.[PayDate]
+	  ,Source.[VoucherDate]
+	  ,Source.[CurrentAmount]
+	  ,Source.[PastDueFlag]
+	  ,Source.[PastDueAmount]
+	  ,Source.[PastDueAmount1to30]
+	  ,Source.[PastDueAmount31to60]
+	  ,Source.[PastDueAmount61to90]
+	  ,Source.[PastDueAmount91to120]
+	  ,Source.[PastDueAmount121to180]
+	  ,Source.[PastDueAmount181to240]
+	  ,Source.[PastDueAmount241to365]
+	  ,Source.[PastDueAmount366Plus]
+	  ,Source.[PayerIdentity]
+	  ,Source.[SeriesReference]
+	  ,Source.[ARInvoiceLineKey]
+	  ,Source.[RecordSource]
+	  ,@Today --[LastUpdateDate]
+	  ,source.CustomerBkey
+	  ,source.LegalEntityBkey
+	  )
+	  ;
+
+/* ----------------------------------
+ Sync records IF missing keys Data Forest 20_109 (IFS)
+---------------------------------- */
+UPDATE fact
+SET PlantKey = new.PlantKey
+	,PaymentTermsKey = new.PaymentTermsKey
+	,InvoiceID = new.InvoiceID
+	,PlantCode = new.PlantCode
+	,OrderNo = new.OrderNo
+	,OrderType = new.OrderType
+	,InvoicePaymentTerms = new.InvoicePaymentTerms
+	,InvoiceVoucherType = new.InvoiceVoucherType
+	,InvoiceVoucherNumber = new.InvoiceVoucherNumber
+	,SICCode = new.SICCode
+	,SalesmanCode = new.SalesmanCode
+	,InvoicePaymentTermDesc = new.InvoicePaymentTermDesc
+[*] AS fact
+	INNER JOIN  [dbo].[CoreARInvoice] AS new 
+		ON fact.CustomerKey = new.CustomerKey 
+		AND fact.LegalEntityKey = new.LegalEntityKey
+		AND fact.CurrencyKey = new.CurrencyKey 
+		AND fact.AccountingCurrencyKey = new.AccountingCurrencyKey 
+        AND fact.RegionalCurrencyKey = new.RegionalCurrencyKey
+		AND fact.CreditManagerKey = new.CreditManagerKey 
+        AND fact.InvoiceNumber = new.InvoiceNumber AND fact.InvoiceLineNo = new.InvoiceLineNo
+		AND fact.InvoiceDate = new.InvoiceDate AND fact.DueDate = new.DueDate 
+        AND fact.DataForestID = new.DataForestID 
+		AND fact.ARInvoiceLineKey = new.ARInvoiceLineKey 
+WHERE fact.PlantKey = -1 AND new.PlantKey <> -1 AND fact.PaymentTermsKey = -1 AND new.PaymentTermsKey <> -1
+	AND fact.DataForestID = '20_109'
+	AND fact.SeriesReference <> 'CUPOA'
+
+/* ----------------------------------
+ Sync records IF missing keys Data Forest 20_109 (IFS) AND Credit Manager doesn't match
+---------------------------------- */
+UPDATE fact
+SET PlantKey = new.PlantKey
+	,PaymentTermsKey = new.PaymentTermsKey
+	,InvoiceID = new.InvoiceID
+	,PlantCode = new.PlantCode
+	,OrderNo = new.OrderNo
+	,OrderType = new.OrderType
+	,InvoicePaymentTerms = new.InvoicePaymentTerms
+	,InvoiceVoucherType = new.InvoiceVoucherType
+	,InvoiceVoucherNumber = new.InvoiceVoucherNumber
+	,SICCode = new.SICCode
+	,SalesmanCode = new.SalesmanCode
+	,InvoicePaymentTermDesc = new.InvoicePaymentTermDesc
+	,CreditManagerKey = new.CreditManagerKey
+[*] AS fact
+	INNER JOIN  [dbo].[CoreARInvoice] AS new 
+		ON fact.CustomerKey = new.CustomerKey 
+		AND fact.LegalEntityKey = new.LegalEntityKey
+		AND fact.CurrencyKey = new.CurrencyKey 
+		AND fact.AccountingCurrencyKey = new.AccountingCurrencyKey 
+		AND fact.RegionalCurrencyKey = new.RegionalCurrencyKey
+		AND fact.InvoiceNumber = new.InvoiceNumber 
+		AND fact.InvoiceLineNo = new.InvoiceLineNo
+		AND fact.InvoiceDate = new.InvoiceDate 
+		AND fact.DueDate = new.DueDate 
+		AND fact.DataForestID = new.DataForestID 
+		AND fact.ARInvoiceLineKey = new.ARInvoiceLineKey 
+WHERE fact.CreditManagerKey = -1 AND new.CreditManagerKey <> -1 
+AND fact.DataForestID = '20_109'
+AND fact.SeriesReference <> 'CUPOA'
+
+/* ----------------------------------------
+ Remove Duplicates After Sync Data Forest 20_109 (IFS)
+---------------------------------------- */
+;with cte AS (
+SELECT ROW_NUMBER()Over(Partition By SnapShotDate, ARAgingKey, CustomerKey, LegalEntityKey, PlantKey, CurrencyKey, AccountingCurrencyKey, RegionalCurrencyKey
+,CreditManagerKey, PaymentTermsKey, InvoiceNumber, InvoiceLineNo, InvoiceDate, DueDate, DataForestID, InvoiceAmount, OpenAmount
+ORDER BY SnapShotDate, ARAgingKey, CustomerKey, LegalEntityKey, PlantKey, CurrencyKey, AccountingCurrencyKey, RegionalCurrencyKey
+,CreditManagerKey, PaymentTermsKey, InvoiceNumber, InvoiceLineNo, InvoiceDate, DueDate, DataForestID, InvoiceAmount, OpenAmount, ARInvoiceKey desc) AS rownum
+,*
+[*] 
+WHERE DataForestID = '20_109'
+)
+
+DELETE FROM cte WHERE rownum > 1
+
+-- clean up remaining dups, same invoice different invoice amounts
+;with cte AS (
+SELECT ROW_NUMBER()Over(Partition By ARAgingKey, CustomerKey, LegalEntityKey, PlantKey, CurrencyKey, AccountingCurrencyKey, RegionalCurrencyKey
+, CreditManagerKey
+, PaymentTermsKey
+, InvoiceNumber
+, InvoiceLineNo
+, InvoiceDate
+, DueDate
+, DataForestID
+ORDER BY ARAgingKey, CustomerKey, LegalEntityKey, PlantKey, CurrencyKey, AccountingCurrencyKey, RegionalCurrencyKey
+,CreditManagerKey, PaymentTermsKey, InvoiceNumber, InvoiceLineNo, InvoiceDate, DueDate, DataForestID, ARInvoiceKey desc) AS rownum
+,*
+[*] 
+WHERE DataForestID = '20_109'
+)
+
+DELETE FROM cte WHERE rownum > 1
+
+/* ----------------------------------------
+ MERGE Data Forest 20_103 (JDE Mexico)
+---------------------------------------- */
+MERGE INTO  [dbo].[CoreARInvoice] AS Target
+USING (
+SELECT  
+	  @SnapShotDate AS SnapShotDate
+	, CASE WHEN DATEDIFF(day,fact.DUE_DATE,@SnapShotDate) <= 0 THEN -1 ELSE 0 END AS ARAgingKey
+	, COALESCE(dcust.CustomerKey, -1) AS CustomerKey
+	, COALESCE(dlegal.LegalEntityKey,-1) AS LegalEntityKey
+	, -1 AS PlantKey
+	, -1 AS CurrencyKey
+	, -1 AS CreditManagerKey
+	, -1 AS PaymentTermsKey
+	, CONVERT(NVARCHAR(50),TRIM(fact.INVOICE_NO)) AS InvoiceNumber
+	, CONVERT(int,NULL)  AS InvoiceID
+	, ROW_NUMBER()Over(Partition By CONVERT(NVARCHAR(50),TRIM(fact.PAYER_IDENTITY)), CONVERT(NVARCHAR(50),TRIM(fact.COMPANY)), CONVERT(NVARCHAR(50),TRIM(fact.INVOICE_NO))
+		ORDER BY CONVERT(NVARCHAR(50),TRIM(fact.PAYER_IDENTITY)), CONVERT(NVARCHAR(50),TRIM(fact.COMPANY)), CONVERT(NVARCHAR(50),TRIM(fact.INVOICE_NO))
+	, ISNULL(CONVERT(NVARCHAR(50),TRIM(fact.VOUCHER_NO)),''), ISNULL(CONVERT(date,fact.PAY_DATE ),'')
+	, CASE WHEN CONVERT(decimal(18,4),fact.PAID_AMOUNT) = 0.00 THEN NULL ELSE CONVERT(decimal(18,4),fact.PAID_AMOUNT) END
+		) AS InvoiceLineNo
+	, CONVERT(date,INVOICE_DATE) AS InvoiceDate
+	, CONVERT(date,DUE_DATE) AS DueDate
+	, Case WHEN DATEDIFF(day,fact.DUE_DATE,@SnapShotDate) < 0 THEN 0 else DATEDIFF(day,fact.DUE_DATE,@SnapShotDate) END  AS DaysPastDue
+	, CONVERT(NVARCHAR(50),TRIM(fact.PAYER_IDENTITY)) AS CustomerNumber
+	, CONVERT(NVARCHAR(50),TRIM(fact.COMPANY)) AS LegalEntityCode
+	, CONVERT(NVARCHAR(50),NULL)  AS PlantCode
+	, CONVERT(NVARCHAR(50),TRIM(fact.ORDER_NO)) AS OrderNo
+	, CONVERT(NVARCHAR(50),NULL)  AS OrderType
+	, CONVERT(NVARCHAR(50),TRIM(fact.PAYER_IDENTITY)) AS PayerNumber
+	, CONVERT(NVARCHAR(50),TRIM(fact.PAY_TERM_ID)) AS InvoicePaymentTerms
+	, CONVERT(NVARCHAR(50),TRIM(fact.PAY_TERM_DESC)) AS InvoicePaymentTermDesc
+	, CONVERT(NVARCHAR(50),TRIM(fact.VOUCHER_TYPE)) AS InvoiceVoucherType
+	, CONVERT(NVARCHAR(50),TRIM(fact.VOUCHER_NO_REF)) AS InvoiceVoucherNumber
+	, CONVERT(NVARCHAR(50),NULL) AS SICCode
+	, CONVERT(NVARCHAR(50),NULL) AS SalesmanCode
+	, CONVERT(NVARCHAR(50),TRIM(fact.Currency)) AS CurrencyCode
+	, '20_103' AS DataForestID
+	, CONVERT(decimal(18,4),fact.INVOICE_AMOUNT) AS InvoiceAmount
+	, CASE WHEN CONVERT(decimal(18,4),fact.OPEN_AMOUNT) = 0.00 THEN NULL ELSE CONVERT(decimal(18,4),fact.OPEN_AMOUNT) END AS OpenAmount 
+	, CASE WHEN CONVERT(decimal(18,4),fact.PAID_AMOUNT) = 0.00 THEN NULL ELSE CONVERT(decimal(18,4),fact.PAID_AMOUNT) END AS PaidAmount
+	, ISNULL(CONVERT(NVARCHAR(50),TRIM(fact.VOUCHER_NO)),'') AS PaymentVoucher
+	, ISNULL(CONVERT(date,fact.PAY_DATE),'') AS PayDate
+	, SUM(CASE WHEN DATEDIFF(day,fact.DUE_DATE,@SnapShotDate) <= 0 OR CONVERT(decimal(18,4),fact.OPEN_AMOUNT) <= 0.00 THEN CONVERT(decimal(18,4),fact.OPEN_AMOUNT) ELSE NULL END) AS CurrentAmount
+	, CASE WHEN DATEDIFF(day,fact.DUE_DATE,@SnapShotDate) >  0 THEN 1 ELSE NULL END AS PastDueFlag
+	, SUM(CASE WHEN DATEDIFF(day,fact.DUE_DATE,@SnapShotDate) >  0 AND CONVERT(decimal(18,4),fact.OPEN_AMOUNT) > 0 THEN CONVERT(decimal(18,4),fact.OPEN_AMOUNT) ELSE NULL END) AS PastDueAmount
+	, SUM(CASE WHEN DATEDIFF(day,fact.DUE_DATE,@SnapShotDate) > 0  AND   DATEDIFF(day,fact.DUE_DATE,@SnapShotDate) <= 30  AND CONVERT(decimal(18,4),fact.OPEN_AMOUNT) > 0  THEN  CONVERT(decimal(18,4),fact.OPEN_AMOUNT) ELSE  NULL END) AS [PastDueAmount1to30]
+	, SUM(CASE WHEN DATEDIFF(day,fact.DUE_DATE,@SnapShotDate) >= 31  AND DATEDIFF(day,fact.DUE_DATE,@SnapShotDate) <= 60  AND CONVERT(decimal(18,4),fact.OPEN_AMOUNT) > 0  THEN  CONVERT(decimal(18,4),fact.OPEN_AMOUNT) ELSE  NULL END) AS [PastDueAmount31to60]
+	, SUM(CASE WHEN DATEDIFF(day,fact.DUE_DATE,@SnapShotDate) >= 61  AND DATEDIFF(day,fact.DUE_DATE,@SnapShotDate) <= 90  AND CONVERT(decimal(18,4),fact.OPEN_AMOUNT) > 0  THEN  CONVERT(decimal(18,4),fact.OPEN_AMOUNT) ELSE  NULL END) AS [PastDueAmount61to90]
+	, SUM(CASE WHEN DATEDIFF(day,fact.DUE_DATE,@SnapShotDate) >= 91  AND DATEDIFF(day,fact.DUE_DATE,@SnapShotDate) <= 120 AND CONVERT(decimal(18,4),fact.OPEN_AMOUNT) > 0  THEN CONVERT(decimal(18,4),fact.OPEN_AMOUNT) ELSE NULL END) AS [PastDueAmount91to120]
+	, SUM(CASE WHEN DATEDIFF(day,fact.DUE_DATE,@SnapShotDate) >= 121 AND DATEDIFF(day,fact.DUE_DATE,@SnapShotDate) <= 180 AND CONVERT(decimal(18,4),fact.OPEN_AMOUNT) > 0  THEN CONVERT(decimal(18,4),fact.OPEN_AMOUNT) ELSE NULL END) AS [PastDueAmount121to180]
+	, SUM(CASE WHEN DATEDIFF(day,fact.DUE_DATE,@SnapShotDate) >= 181 AND DATEDIFF(day,fact.DUE_DATE,@SnapShotDate) <= 240 AND CONVERT(decimal(18,4),fact.OPEN_AMOUNT) > 0  THEN CONVERT(decimal(18,4),fact.OPEN_AMOUNT) ELSE NULL END) AS [PastDueAmount181to240]
+	, SUM(CASE WHEN DATEDIFF(day,fact.DUE_DATE,@SnapShotDate) >= 241 AND DATEDIFF(day,fact.DUE_DATE,@SnapShotDate) <= 365 AND CONVERT(decimal(18,4),fact.OPEN_AMOUNT) > 0  THEN CONVERT(decimal(18,4),fact.OPEN_AMOUNT) ELSE NULL END) AS [PastDueAmount241to365]
+	, SUM(CASE WHEN DATEDIFF(day,fact.DUE_DATE,@SnapShotDate) > 365 AND CONVERT(decimal(18,4),fact.OPEN_AMOUNT) > 0 THEN CONVERT(decimal(18,4),fact.OPEN_AMOUNT) ELSE NULL END) AS [PastDueAmount366Plus]
+	, CONVERT(NVARCHAR(50),TRIM(fact.PAYER_IDENTITY)) AS [PayerIdentity]
+	, CONVERT(NVARCHAR(50),TRIM(fact.SERIES_REFERENCE)) AS [SeriesReference]
+	, line.[ARInvoiceLineKey]
+	, 'CustomerPayment' AS [RecordSource]
+	, ACCT_YEAR_REF AS AccountingYear
+	, ACCT_PERIOD_REF AS AccountingPeriod
+FROM store.[T_20_103_1_CustomerPayment] AS fact 
+	LEFT JOIN dbo.CoreCustomer AS dcust 
+    ON CONVERT(NVARCHAR(50),TRIM(fact.PAYER_IDENTITY)) + '|' + CONVERT(NVARCHAR(50),TRIM(fact.COMPANY)) + '#20_0003' = dcust.CustomerBKEY
+	LEFT JOIN dbo.CoreLegalEntity AS dlegal 
+		ON CONVERT(NVARCHAR(50),TRIM(fact.COMPANY)) + '#20_0003' = dlegal.LegalEntityBKEY
+	INNER JOIN  [dbo].[CoreARInvoiceLine]  AS line 
+		ON CONVERT(NVARCHAR(50),TRIM(fact.INVOICE_NO)) +'|'+ CONVERT(NVARCHAR(50),TRIM(fact.SERIES_REFERENCE))  
+    +'|'+ CONVERT(NVARCHAR(50),TRIM(fact.PAYER_IDENTITY)) 
+    +'|' + CONVERT(NVARCHAR(8),CONVERT(date,INVOICE_DATE),112) 
+    +'|' + CONVERT(NVARCHAR(8),CONVERT(date,DUE_DATE),112)
+		= line.ARInvoiceLineDetail
+WHERE 1=1
+GROUP BY CASE WHEN DATEDIFF(day,fact.DUE_DATE,@SnapShotDate) <= 0 THEN -1 ELSE 0 END
+	,COALESCE(dcust.CustomerKey, -1) 
+	,COALESCE(dlegal.LegalEntityKey,-1) 
+	,CONVERT(NVARCHAR(50),TRIM(fact.INVOICE_NO))
+	,DATEDIFF(day,fact.DUE_DATE,@SnapShotDate) 
+	,CONVERT(date,INVOICE_DATE) 
+	,CONVERT(date,DUE_DATE) 
+	,CONVERT(NVARCHAR(50),TRIM(fact.PAYER_IDENTITY)) 
+	,CONVERT(NVARCHAR(50),TRIM(fact.COMPANY)) 
+	,CONVERT(NVARCHAR(50),TRIM(fact.ORDER_NO)) 
+	,CONVERT(NVARCHAR(50),TRIM(fact.PAYER_IDENTITY)) 
+	,CONVERT(NVARCHAR(50),TRIM(fact.PAY_TERM_ID)) 
+	,CONVERT(NVARCHAR(50),TRIM(fact.PAY_TERM_DESC)) 
+	,CONVERT(NVARCHAR(50),TRIM(fact.VOUCHER_TYPE)) 
+	,CONVERT(NVARCHAR(50),TRIM(fact.VOUCHER_NO_REF)) 
+	,CONVERT(NVARCHAR(50),TRIM(fact.Currency)) 
+	,CONVERT(decimal(18,4),fact.INVOICE_AMOUNT) 
+	,CONVERT(decimal(18,4),fact.OPEN_AMOUNT) 
+	,CONVERT(decimal(18,4),fact.PAID_AMOUNT) 
+	,ISNULL(CONVERT(NVARCHAR(50),TRIM(fact.VOUCHER_NO)),'')
+	,ISNULL(CONVERT(date,fact.PAY_DATE),'')
+	,COALESCE(dcust.CustomerKey, -1) 
+	,COALESCE(dlegal.LegalEntityKey,-1) 
+	, CASE WHEN DATEDIFF(day,fact.DUE_DATE,@SnapShotDate) >  0 THEN 1 ELSE NULL END
+	, CONVERT(NVARCHAR(50),TRIM(fact.SERIES_REFERENCE))
+	, line.[ARInvoiceLineKey]
+	,ACCT_YEAR_REF 
+	,ACCT_PERIOD_REF
+) AS Source ON Target.InvoiceNumber = Source.InvoiceNumber 
+	AND Target.LegalEntityCode = Source.LegalEntityCode 
+	AND Target.CustomerNumber = Source.CustomerNumber
+	AND Target.DataForestID = Source.DataForestID 
+	AND Target.InvoiceLineNo = Source.InvoiceLineNo 
+WHEN MATCHED 
+AND ISNULL(Target.InvoiceNumber,'') != ISNULL(Source.InvoiceNumber,'')
+OR ISNULL(Target.InvoiceID,0) != ISNULL(Source.InvoiceID,0)
+OR ISNULL(Target.InvoiceDate,'') != ISNULL(Source.InvoiceDate,'')
+OR ISNULL(Target.DueDate,'') != ISNULL(Source.DueDate,'')
+OR ISNULL(Target.DaysPastDue,0) != ISNULL(Source.DaysPastDue,0)
+OR ISNULL(Target.ARAgingKey,0) != ISNULL(Source.ARAgingKey,0)
+OR ISNULL(Target.PlantCode,'') != ISNULL(Source.PlantCode,'')
+OR ISNULL(Target.OrderNo,'') != ISNULL(Source.OrderNo,'')
+OR ISNULL(Target.OrderType,'') != ISNULL(Source.OrderType,'')
+OR ISNULL(Target.PayerNumber,'') != ISNULL(Source.PayerNumber,'')
+OR ISNULL(Target.InvoicePaymentTerms,'') != ISNULL(Source.InvoicePaymentTerms,'')
+OR ISNULL(Target.InvoiceVoucherType,'') != ISNULL(Source.InvoiceVoucherType,'')
+OR ISNULL(Target.InvoiceVoucherNumber,'') != ISNULL(Source.InvoiceVoucherNumber,'')
+OR ISNULL(Target.SICCode,'') != ISNULL(Source.SICCode,'')
+OR ISNULL(Target.SalesmanCode,'') != ISNULL(Source.SalesmanCode,'')
+OR ISNULL(Target.CurrencyCode,'') != ISNULL(Source.CurrencyCode,'')
+OR ISNULL(Target.[InvoiceAmount] ,0) != ISNULL(Source.[InvoiceAmount] ,0)
+OR ISNULL(Target.[OpenAmount] ,0) != ISNULL(Source.[OpenAmount] ,0)
+OR ISNULL(Target.[PaidAmount],0) != ISNULL(Source.[PaidAmount] ,0)
+OR ISNULL(Target.[PaymentVoucher] ,'') != ISNULL(Source.[PaymentVoucher] ,'')
+OR ISNULL(Target.[PayDate] ,'') != ISNULL(Source.[PayDate] ,'')
+OR ISNULL(Target.[CurrentAmount],0) != ISNULL(Source.[CurrentAmount] ,0)
+OR ISNULL(Target.[PastDueFlag],0) != ISNULL(Source.[PastDueFlag],0)
+OR ISNULL(Target.[PastDueAmount],0) != ISNULL(Source.[PastDueAmount] ,0)
+OR ISNULL(Target.[PastDueAmount1to30],0) != ISNULL(Source.[PastDueAmount1to30] ,0)
+OR ISNULL(Target.[PastDueAmount31to60],0) != ISNULL(Source.[PastDueAmount31to60] ,0)
+OR ISNULL(Target.[PastDueAmount61to90],0) != ISNULL(Source.[PastDueAmount61to90] ,0)
+OR ISNULL(Target.[PastDueAmount91to120],0) != ISNULL(Source.[PastDueAmount91to120] ,0)
+OR ISNULL(Target.[PastDueAmount121to180],0) != ISNULL(Source.[PastDueAmount121to180] ,0)
+OR ISNULL(Target.[PastDueAmount181to240],0) != ISNULL(Source.[PastDueAmount181to240] ,0)
+OR ISNULL(Target.[PastDueAmount241to365],0) != ISNULL(Source.[PastDueAmount241to365] ,0)
+OR ISNULL(Target.[PastDueAmount366Plus],0) != ISNULL(Source.[PastDueAmount366Plus],0)
+OR ISNULL(Target.[PayerIdentity],'') != ISNULL(Source.[PayerIdentity],'')
+OR ISNULL(Target.[SeriesReference],'') != ISNULL(Source.[SeriesReference],'')
+OR ISNULL(Target.[ARInvoiceLineKey],'') != ISNULL(Source.[ARInvoiceLineKey],'')
+OR ISNULL(Target.AccountingYear,'') != ISNULL(Source.AccountingYear,'')
+OR ISNULL(Target.AccountingPeriod,'') != ISNULL(Source.AccountingPeriod,'')
+THEN UPDATE SET
+	[SnapShotDate] = @SnapShotDate
+	,[InvoiceNumber] = Source.[InvoiceNumber]
+     ,[InvoiceDate] = Source.[InvoiceDate]
+      ,[DueDate] = Source.[DueDate]
+	  ,[DaysPastDue] = Source.[DaysPastDue]
+	  ,[ARAgingKey] = Source.[ARAgingKey]
+	  ,[ARInvoiceLineKey] = Source.[ARInvoiceLineKey]
+      ,[PlantCode] = Source.[PlantCode]
+      ,[OrderNo] = Source.[OrderNo]
+      ,[OrderType] = Source.[OrderType]
+      ,[PayerNumber] = Source.[PayerNumber]
+      ,[InvoicePaymentTerms] = Source.[InvoicePaymentTerms]
+      ,[InvoiceVoucherType] = Source.[InvoiceVoucherType]
+      ,[InvoiceVoucherNumber] = Source.[InvoiceVoucherNumber]
+      ,[SICCode] = Source.[SICCode]
+      ,[SalesmanCode] = Source.[SalesmanCode]
+      ,[CurrencyCode] = Source.[CurrencyCode]
+	  ,[InvoiceAmount]  = Source.[InvoiceAmount] 
+	  ,[OpenAmount] = Source.[OpenAmount]
+	  ,[PaidAmount] = Source.[PaidAmount]
+	  ,[PaymentVoucher] = Source.[PaymentVoucher]
+	  ,[PayDate] = Source.[PayDate]
+	  ,[CurrentAmount] = Source.[CurrentAmount]
+      ,[PastDueFlag] = Source.[PastDueFlag]
+      ,[PastDueAmount] = Source.[PastDueAmount]
+      ,[PastDueAmount1to30] = Source.[PastDueAmount1to30]
+      ,[PastDueAmount31to60] = Source.[PastDueAmount31to60]
+      ,[PastDueAmount61to90] = Source.[PastDueAmount61to90]
+      ,[PastDueAmount91to120] = Source.[PastDueAmount91to120]
+      ,[PastDueAmount121to180] = Source.[PastDueAmount121to180]
+      ,[PastDueAmount181to240] = Source.[PastDueAmount181to240]
+      ,[PastDueAmount241to365] = Source.[PastDueAmount241to365]
+      ,[PastDueAmount366Plus] = Source.[PastDueAmount366Plus]
+	  ,[PayerIdentity] = Source.[PayerIdentity]
+	  ,[SeriesReference] = Source.[SeriesReference]
+	  ,[RecordSource] = Source.[RecordSource]
+	  ,[LastUpdateDate] = @Today
+	  ,AccountingYear = Source.AccountingYear
+	  ,AccountingPeriod = Source.AccountingPeriod
+WHEN NOT MATCHED THEN
+INSERT (
+	   [SnapShotDate]	
+	  ,[InvoiceNumber]
+      ,[InvoiceID]
+	  ,[InvoiceLineNo]
+      ,[InvoiceDate]
+      ,[DueDate]
+	  ,[DaysPastDue]
+	  ,[ARAgingKey]
+	  ,[ARInvoiceLineKey]
+	  ,[CustomerKey]
+	  ,[LegalEntityKey]
+	  ,[PlantKey]
+	  ,[CurrencyKey]
+	  ,[CreditManagerKey]
+	  ,[PaymentTermsKey]
+      ,[CustomerNumber]
+      ,[LegalEntityCode]
+      ,[PlantCode]
+      ,[OrderNo]
+      ,[OrderType]
+      ,[PayerNumber]
+      ,[InvoicePaymentTerms]
+      ,[InvoiceVoucherType]
+      ,[InvoiceVoucherNumber]
+      ,[SICCode]
+      ,[SalesmanCode]
+      ,[CurrencyCode]
+	  ,[DataForestID]
+	  ,[InvoiceAmount] 
+	  ,[OpenAmount]
+	  ,[PaidAmount]
+	  ,[PaymentVoucher]
+	  ,[PayDate]
+	  ,[CurrentAmount]
+	  ,[PastDueFlag]
+	  ,[PastDueAmount]
+	  ,[PastDueAmount1to30]
+	  ,[PastDueAmount31to60]
+	  ,[PastDueAmount61to90]
+	  ,[PastDueAmount91to120]
+	  ,[PastDueAmount121to180]
+	  ,[PastDueAmount181to240]
+	  ,[PastDueAmount241to365]
+	  ,[PastDueAmount366Plus]
+	  ,[PayerIdentity]
+	  ,[SeriesReference]
+	  ,[RecordSource]
+	  ,[LastUpdateDate]
+	  ,[AccountingYear]
+	  ,[AccountingPeriod]
+	  )
+VALUES (
+	   @SnapShotDate
+	  ,Source.[InvoiceNumber]
+      ,Source.[InvoiceID]
+	  ,Source.[InvoiceLineNo]
+      ,Source.[InvoiceDate]
+      ,Source.[DueDate]
+	  ,Source.[DaysPastDue]
+	  ,Source.[ARAgingKey]
+	  ,Source.[ARInvoiceLineKey]
+	  ,Source.[CustomerKey]
+	  ,Source.[LegalEntityKey]
+	  ,Source.[PlantKey]
+	  ,Source.[CurrencyKey]
+	  ,Source.[CreditManagerKey]
+	  ,Source.[PaymentTermsKey]
+      ,Source.[CustomerNumber]
+      ,Source.[LegalEntityCode]
+      ,Source.[PlantCode]
+      ,Source.[OrderNo]
+      ,Source.[OrderType]
+      ,Source.[PayerNumber]
+      ,Source.[InvoicePaymentTerms]
+      ,Source.[InvoiceVoucherType]
+      ,Source.[InvoiceVoucherNumber]
+      ,Source.[SICCode]
+      ,Source.[SalesmanCode]
+      ,Source.[CurrencyCode]
+	  ,Source.[DataForestID]
+	  ,Source.[InvoiceAmount] 
+	  ,Source.[OpenAmount]
+	  ,Source.[PaidAmount]
+	  ,Source.[PaymentVoucher]
+	  ,Source.[PayDate]
+	  ,Source.[CurrentAmount]
+	  ,Source.[PastDueFlag]
+	  ,Source.[PastDueAmount]
+	  ,Source.[PastDueAmount1to30]
+	  ,Source.[PastDueAmount31to60]
+	  ,Source.[PastDueAmount61to90]
+	  ,Source.[PastDueAmount91to120]
+	  ,Source.[PastDueAmount121to180]
+	  ,Source.[PastDueAmount181to240]
+	  ,Source.[PastDueAmount241to365]
+	  ,Source.[PastDueAmount366Plus]
+	  ,Source.[PayerIdentity]
+	  ,Source.[SeriesReference]
+	  ,Source.[RecordSource]
+	  ,@Today --[LastUpdateDate]
+	  ,Source.[AccountingYear]
+	  ,Source.[AccountingPeriod]
+	  )
+	  ;
+
+/* ----------------------------------------
+ UPDATE Keys
+---------------------------------------- */
+	UPDATE fact
+	SET ARAgingKey = CASE WHEN DaysPastDue <= 0 THEN -1
+					      WHEN DaysPastDue >= (SELECT MAX(ARAgingDays) FROM [dbo].[CoreARAging]) THEN -2
+						  ELSE DaysPastDue END
+	,AcctRecPartialPayment = CASE WHEN COALESCE(fact.PaidAmount,0.00) <> 0.00  AND COALESCE(fact.OpenAmountOrg,0.00) <> 0.00 THEN 'Yes' ELSE 'No' END
+	[*] AS fact
+	WHERE DaysPastDue <> -1
+	
+	UPDATE fact
+	SET CustomerKey = dcust.CustomerKey
+	[*] AS fact
+	INNER JOIN   dbo.CoreCustomer  AS dcust 
+	ON CONVERT(NVARCHAR(50),TRIM(fact.CustomerNumber))+'|'+CONVERT(NVARCHAR(50),TRIM(fact.LegalEntityCode))+'#'+CASE WHEN CONVERT(NVARCHAR(20),TRIM(fact.[DataForestID])) = '20_109' THEN '20_0009' END
+		= dcust.CustomerBKEY
+	WHERE fact.CustomerKey = -1
+
+	-- Second Pass for Data Forest 20_103 JDE Mexico to not include legal entity
+	UPDATE fact
+	SET CustomerKey = dcust.CustomerKey
+	[*] AS fact
+	INNER JOIN   dbo.CoreCustomer  AS dcust 
+		ON fact.CustomerBKey = dcust.CustomerBKEY
+	WHERE fact.CustomerKey = -1
+	AND fact.DataForestID = '20_103'
+
+	UPDATE fact
+	SET LegalEntityKey = dim.LegalEntityKey
+	[*] AS fact
+	INNER JOIN   dbo.CoreLegalEntity  AS dim 
+	ON CONVERT(NVARCHAR(50),TRIM(fact.LegalEntityCode))+'#'+CASE WHEN CONVERT(NVARCHAR(20),TRIM(fact.[DataForestID])) = '20_109' THEN '20_0009' ELSE '20_0003' END
+		= dim.LegalEntityBKEY
+	WHERE fact.LegalEntityKey = -1
+
+-- UPDATE CURRENCY Keys
+IF OBJECT_ID('tempdb..#TempAcctRegCurrency') IS NOT NULL
+BEGIN
+    DROP TABLE #TempAcctRegCurrency
+END
+
+SELECT dlegal.LegalEntityKey, acct.CurrencyKey AS AccountingCurrencyKey, reg.CurrencyKey AS RegionalCurrencyKey
+INTO #TempAcctRegCurrency
+FROM [dbo].[vDimLegalEntity] AS dlegal
+	INNER JOIN  [dbo].[vDimCurrency] AS acct 
+		ON dlegal.AccountingCurrencyCode = acct.CurrencyCode
+	INNER JOIN  [dbo].[vDimCurrency] AS reg 
+		ON dlegal.RegionalCurrencyCode = reg.CurrencyCode
+
+CREATE NONCLUSTERED COLUMNSTORE INDEX NCCI_TempAcctRegCurrency ON #TempAcctRegCurrency(LegalEntityKey)
+
+	UPDATE fact
+	SET AccountingCurrencyKey = temp.AccountingCurrencyKey
+	,RegionalCurrencyKey = temp.RegionalCurrencyKey
+	[*] AS fact
+		INNER JOIN  #TempAcctRegCurrency AS temp 
+			ON fact.LegalEntityKey = temp.LegalEntityKey
+
+	UPDATE fact
+	SET PlantKey = dim.PlantKey
+	[*] AS fact
+	INNER JOIN   dbo.CorePlant  AS dim 
+		ON CONVERT(NVARCHAR(50),TRIM(fact.PlantCode))+'#'+CASE WHEN CONVERT(NVARCHAR(20),TRIM(fact.[DataForestID])) = '20_109' THEN '20_0009' END
+		= dim.PlantBKEY
+	WHERE fact.PlantKey = -1
+
+	UPDATE fact
+	SET CurrencyKey = dim.CurrencyKey
+	[*] AS fact
+	INNER JOIN   dbo.CoreCurrency  AS dim 
+		ON fact.CurrencyCode = dim.CurrencyCode
+	WHERE fact.CurrencyKey = -1
+	
+	UPDATE fact
+	SET PaymentTermsKey = dim.PaymentTermsKey
+	[*] AS fact
+	INNER JOIN   dbo.CorePaymentTerms  AS dim 
+		ON fact.InvoicePaymentTerms = dim.PaymentTermsCode
+	WHERE ISNULL(fact.PaymentTermsKey,-1) = -1
+
+-- Pass #1 with legal entity code AND customer number
+	UPDATE fact
+	SET CreditManagerKey = dim.CreditManagerKey
+	[*] AS fact
+	INNER JOIN   (SELECT store.COMPANY, store.[IDENTITY], store.CREDIT_ANALYST_CODE, store.CA_DESCRIPTION
+				, TRIM(COALESCE(store.CA_MANAGER,store.CREDIT_ANALYST_CODE)) AS CA_MANAGER
+				, TRIM(COALESCE(store.MANAGER_DESC,store.CA_DESCRIPTION)) AS MANAGER_DESC
+				, dm.CreditManagerKey
+				FROM [store].[T_20_109_1_CustomerAR] AS store
+					INNER JOIN  dbo.CoreCreditManager AS dm ON TRIM(store.CREDIT_ANALYST_CODE) = dm.CreditAnalystCode 
+					AND TRIM(store.CA_DESCRIPTION) = dm.CreditAnalystDesc
+						AND TRIM(COALESCE(store.CA_MANAGER,store.CREDIT_ANALYST_CODE)) = dm.CreditManagerCode 
+						AND TRIM(COALESCE(store.MANAGER_DESC,store.CA_DESCRIPTION))  = dm.CreditManagerDesc
+				GROUP BY store.COMPANY, store.[IDENTITY], store.CREDIT_ANALYST_CODE, store.CA_DESCRIPTION
+				, TRIM(COALESCE(store.CA_MANAGER,store.CREDIT_ANALYST_CODE))
+				, TRIM(COALESCE(store.MANAGER_DESC,store.CA_DESCRIPTION))
+				, dm.CreditManagerKey
+			)  AS dim ON fact.LegalEntityCode = dim.COMPANY AND fact.CustomerNumber = dim.[IDENTITY]
+	WHERE fact.CreditManagerKey = -1 
+
+-- Pass #2 with legal entity code AND payer IDENTITY
+	UPDATE fact
+	SET CreditManagerKey = dim.CreditManagerKey
+	[*] AS fact
+	INNER JOIN   (SELECT store.COMPANY
+				, store.[IDENTITY]
+				, store.CREDIT_ANALYST_CODE
+				, store.CA_DESCRIPTION
+				, TRIM(COALESCE(store.CA_MANAGER,store.CREDIT_ANALYST_CODE)) AS CA_MANAGER
+				, TRIM(COALESCE(store.MANAGER_DESC,store.CA_DESCRIPTION)) AS MANAGER_DESC
+				, dm.CreditManagerKey
+				, store.LegalEntityBKey
+				FROM [store].[T_20_109_1_CustomerAR]  AS store
+					INNER JOIN  dbo.CoreCreditManager AS dm ON TRIM(store.CREDIT_ANALYST_CODE) = dm.CreditAnalystCode AND TRIM(store.CA_DESCRIPTION) = dm.CreditAnalystDesc
+						AND TRIM(COALESCE(store.CA_MANAGER,store.CREDIT_ANALYST_CODE)) = dm.CreditManagerCode 
+						AND TRIM(COALESCE(store.MANAGER_DESC,store.CA_DESCRIPTION))  = dm.CreditManagerDesc
+				GROUP BY store.COMPANY, store.[IDENTITY], store.CREDIT_ANALYST_CODE, store.CA_DESCRIPTION
+				, TRIM(COALESCE(store.CA_MANAGER,store.CREDIT_ANALYST_CODE))
+				, TRIM(COALESCE(store.MANAGER_DESC,store.CA_DESCRIPTION))
+				, dm.CreditManagerKey
+				, store.LegalEntityBKey
+			)  AS dim ON fact.LegalEntityBKey = dim.LegalEntityBKey AND fact.PayerIdentity = dim.[IDENTITY]
+	WHERE fact.CreditManagerKey = -1 
+
+-- Pass #3 with customer number
+	UPDATE fact
+	SET CreditManagerKey = dim.CreditManagerKey
+	[*] AS fact
+	INNER JOIN   (SELECT store.COMPANY
+				, store.[IDENTITY]
+				, store.CREDIT_ANALYST_CODE
+				, store.CA_DESCRIPTION
+				, TRIM(COALESCE(store.CA_MANAGER,store.CREDIT_ANALYST_CODE)) AS CA_MANAGER
+				, TRIM(COALESCE(store.MANAGER_DESC,store.CA_DESCRIPTION)) AS MANAGER_DESC
+				, dm.CreditManagerKey
+				, store.CustomerBKey
+				FROM [store].[T_20_109_1_CustomerAR]  AS store
+					INNER JOIN  dbo.CoreCreditManager AS dm 
+					ON TRIM(store.CREDIT_ANALYST_CODE) = dm.CreditAnalystCode 
+						AND TRIM(store.CA_DESCRIPTION) = dm.CreditAnalystDesc
+						AND TRIM(COALESCE(store.CA_MANAGER,store.CREDIT_ANALYST_CODE)) = dm.CreditManagerCode 
+						AND TRIM(COALESCE(store.MANAGER_DESC,store.CA_DESCRIPTION))  = dm.CreditManagerDesc
+				GROUP BY store.COMPANY, store.[IDENTITY], store.CREDIT_ANALYST_CODE, store.CA_DESCRIPTION
+				, TRIM(COALESCE(store.CA_MANAGER,store.CREDIT_ANALYST_CODE))
+				, TRIM(COALESCE(store.MANAGER_DESC,store.CA_DESCRIPTION))
+				, dm.CreditManagerKey
+				, store.CustomerBKey
+			)  AS dim ON fact.CustomerBKey = dim.CustomerBKey
+	WHERE fact.CreditManagerKey = -1 
+
+-- Pass #4 with payer IDENTITY
+	UPDATE fact
+	SET CreditManagerKey = dim.CreditManagerKey
+	[*] AS fact
+	INNER JOIN   (SELECT store.COMPANY, store.[IDENTITY], store.CREDIT_ANALYST_CODE, store.CA_DESCRIPTION
+				, TRIM(COALESCE(store.CA_MANAGER,store.CREDIT_ANALYST_CODE)) AS CA_MANAGER
+				, TRIM(COALESCE(store.MANAGER_DESC,store.CA_DESCRIPTION)) AS MANAGER_DESC
+				, dm.CreditManagerKey
+				FROM [store].[T_20_109_1_CustomerAR]  AS store
+					INNER JOIN  dbo.CoreCreditManager AS dm ON TRIM(store.CREDIT_ANALYST_CODE) = dm.CreditAnalystCode AND TRIM(store.CA_DESCRIPTION) = dm.CreditAnalystDesc
+						AND TRIM(COALESCE(store.CA_MANAGER,store.CREDIT_ANALYST_CODE)) = dm.CreditManagerCode 
+						AND TRIM(COALESCE(store.MANAGER_DESC,store.CA_DESCRIPTION))  = dm.CreditManagerDesc
+				GROUP BY store.COMPANY, store.[IDENTITY], store.CREDIT_ANALYST_CODE, store.CA_DESCRIPTION
+				, TRIM(COALESCE(store.CA_MANAGER,store.CREDIT_ANALYST_CODE))
+				, TRIM(COALESCE(store.MANAGER_DESC,store.CA_DESCRIPTION))
+				, dm.CreditManagerKey
+			)  AS dim ON fact.PayerIdentity = dim.[IDENTITY]
+	WHERE fact.CreditManagerKey = -1 
+
+--getting END market AND segment FROM the Invoice Line table 
+	
+IF OBJECT_ID('tempdb..#TempCombinations') IS NOT NULL
+DROP TABLE #TempCombinations
+
+	SELECT  EndMarketKey, SegmentKey, InvoiceCustomerKey, InvoiceNumber,[DIM_DataForest_SKEY]
+	INTO #TempCombinations
+	FROM [dbo].[vFactSalesInvoices] AS fact 
+	GROUP BY EndMarketKey, SegmentKey, InvoiceCustomerKey, InvoiceNumber,[DIM_DataForest_SKEY]
+
+	UPDATE fact
+	SET fact.EndMarketKey = COALESCE(temp.EndMarketKey,'-1'),
+	fact.SegmentKey = COALESCE(temp.SegmentKey,'-1')
+		[*] AS fact
+		LEFT JOIN #TempCombinations AS temp 
+		ON fact.DataForestID=temp.DIM_DataForest_SKEY
+		AND fact.CustomerKey=temp.InvoiceCustomerKey
+        AND fact.InvoiceNumber=temp.InvoiceNumber
+
+IF OBJECT_ID('tempdb..#TempInvoicePayTerms') IS NOT NULL
+DROP TABLE #TempInvoicePayTerms
+
+SELECT [CUSTOMER_PAY_TERM]
+	,[CUSOTMER_PAY_TERM_DESC]
+INTO #TempInvoicePayTerms
+FROM [store].[T_20_109_1_CustomerPaymentCombined]
+GROUP BY [CUSTOMER_PAY_TERM]
+	,[CUSOTMER_PAY_TERM_DESC]
+
+
+UPDATE fact
+SET [InvoicePaymentTermDesc] = COALESCE([CUSOTMER_PAY_TERM_DESC],'Unknown')
+[*] AS fact
+	LEFT JOIN #TempInvoicePayTerms AS temp 
+		ON fact.[InvoicePaymentTerms]=temp.[CUSTOMER_PAY_TERM]
+
+-- UPDATE exchange rates
+UPDATE fact
+SET [AccountingExchangeRate] = AcctRates.ExchangeRate
+,[RegionalExchangeRate] = regrates.ExchangeRate
+[*] AS fact 
+	INNER JOIN  [dbo].[vDimCurrency] AS dcurr ON fact.CurrencyKey = dcurr.CurrencyKey
+	INNER JOIN  [dbo].[vDimCurrency] AS regcurr ON fact.RegionalCurrencyKey = regcurr.CurrencyKey
+	INNER JOIN  [dbo].[vDimCurrency] AS acctcurr ON fact.AccountingCurrencyKey = acctcurr.CurrencyKey
+
+-- Join for Regional CURRENCY Rates
+	INNER JOIN  (SELECT * FROM dbo.GroupExchangeRates WHERE ExchangeRateType = 'Closing') AS RegRates
+		ON CASE WHEN regcurr.CurrencyCode = 'PES' THEN 'MXN'ELSE regcurr.CurrencyCode END = regrates.ToCurrencyCode 
+			AND CASE WHEN dcurr.CurrencyCode = 'PES' THEN 'MXN'ELSE dcurr.CurrencyCode END = regrates.FromCurrencyCode 
+			AND fact.SnapShotDate BETWEEN regrates.ValidFromDate AND regrates.ValidToDate
+
+
+-- Join for Accounting CURRENCY Rates
+	INNER JOIN  (SELECT * FROM dbo.GroupExchangeRates WHERE ExchangeRateType = 'Closing') AS AcctRates
+		ON CASE WHEN acctcurr.CurrencyCode = 'PES' THEN 'MXN'ELSE acctcurr.CurrencyCode END = AcctRates.ToCurrencyCode 
+			AND CASE WHEN dcurr.CurrencyCode = 'PES' THEN 'MXN'ELSE dcurr.CurrencyCode END = AcctRates.FromCurrencyCode 
+			AND fact.SnapShotDate BETWEEN AcctRates.ValidFromDate AND AcctRates.ValidToDate
+
+
+-- Add Keys back to AR SnapShot
+UPDATE snap
+SET CustomerKey = core.CustomerKey
+	,LegalEntityKey = core.LegalEntityKey
+	,PlantKey = core.PlantKey
+	,CurrencyKey = core.CurrencyKey
+	,AccountingCurrencyKey = core.AccountingCurrencyKey
+	,RegionalCurrencyKey = core.RegionalCurrencyKey
+	,CreditManagerKey = core.CreditManagerKey
+	,SegmentKey = core.SegmentKey
+	,EndMarketKey = core.EndMarketKey
+FROM [store].[T_20_109_1_CustomerARSnapshot] AS snap
+	INNER JOIN  dbo.CoreARInvoice AS core 
+		ON CONVERT(NVARCHAR(50),TRIM(snap.INVOICE_NO)) = core.InvoiceNumber 
+		AND snap.CustomerBKey = core.CustomerBKey
+		AND snap.LegalEntityBKey = core.LegalEntityBKey
+        AND CONVERT(date,snap.INVOICE_DATE) = core.InvoiceDate 
+        AND CONVERT(date,snap.DUE_DATE) = core.DueDate
+	INNER JOIN  #TempCustARSnapShot109 AS temp 
+		ON snap.LegalEntityBKey = temp.LegalEntityBKey
+		AND snap.CustomerBKey = temp.CustomerBKey 
+		AND snap.INVOICE_NO = temp.INVOICE_NO
+		AND snap.SERIES_ID = temp.SERIES_ID 
+		AND CONVERT(date,snap.INVOICE_DATE) = temp.INVOICE_DATE 
+		AND CONVERT(date,snap.DUE_DATE) = temp.DUE_DATE
+
+/* ----------------------------------------
+ UPDATE Keys-- Balance CUPOA only UPDATE the nulls nm added 2020-07-02
+---------------------------------------- */
+	UPDATE fact
+	SET ARAgingKey = CASE WHEN DaysPastDue <= 0 THEN -1
+					      WHEN DaysPastDue >= (SELECT MAX(ARAgingDays) FROM [dbo].[CoreARAging]) THEN -2
+						  ELSE DaysPastDue END
+	,AcctRecPartialPayment = CASE WHEN COALESCE(fact.PaidAmount,0.00) <> 0.00  AND COALESCE(fact.OpenAmount,0.00) <> 0.00 THEN 'Yes' ELSE 'No' END
+	FROM [dbo].[CoreARInvoiceBalance] AS fact
+	WHERE DaysPastDue <> -1
+	AND SeriesReference ='CUPOA'
+	AND ARAgingKey is null
+
+	UPDATE fact
+	SET CustomerKey = dcust.CustomerKey
+	FROM [dbo].[CoreARInvoiceBalance] AS fact
+	INNER JOIN   dbo.CoreCustomer  AS dcust 
+	ON CONVERT(NVARCHAR(50),TRIM(fact.CustomerNumber))+'|'+CONVERT(NVARCHAR(50),TRIM(fact.LegalEntityCode))+'#'+CASE WHEN CONVERT(NVARCHAR(20),TRIM(fact.[DataForestID])) = '20_109' THEN '20_0009' END
+		= dcust.CustomerBKEY
+	WHERE  SeriesReference ='CUPOA' AND fact.CustomerKey is null
+
+	UPDATE fact
+	SET LegalEntityKey = dim.LegalEntityKey
+	FROM [dbo].[CoreARInvoiceBalance] AS fact
+	INNER JOIN   dbo.CoreLegalEntity  AS dim 
+	ON CONVERT(NVARCHAR(50),TRIM(fact.LegalEntityCode))+'#'+CASE WHEN CONVERT(NVARCHAR(20),TRIM(fact.[DataForestID])) = '20_109' THEN '20_0009' ELSE '20_0003' END
+		= dim.LegalEntityBKEY
+	WHERE fact.LegalEntityKey is null AND SeriesReference ='CUPOA'
+
+-- UPDATE CURRENCY Keys
+IF OBJECT_ID('tempdb..#TempAcctRegCurrencybal') IS NOT NULL
+BEGIN
+    DROP TABLE #TempAcctRegCurrencybal
+END
+
+SELECT dlegal.LegalEntityKey, acct.CurrencyKey AS AccountingCurrencyKey, reg.CurrencyKey AS RegionalCurrencyKey
+INTO #TempAcctRegCurrencybal
+FROM [dbo].[vDimLegalEntity] AS dlegal
+	INNER JOIN  [dbo].[vDimCurrency] AS acct ON dlegal.AccountingCurrencyCode = acct.CurrencyCode
+	INNER JOIN  [dbo].[vDimCurrency] AS reg ON dlegal.RegionalCurrencyCode = reg.CurrencyCode
+
+CREATE NONCLUSTERED COLUMNSTORE INDEX NCCI_TempAcctRegCurrency ON #TempAcctRegCurrencybal (LegalEntityKey)
+
+	UPDATE fact
+	SET AccountingCurrencyKey = temp.AccountingCurrencyKey
+	,RegionalCurrencyKey = temp.RegionalCurrencyKey
+	FROM [dbo].[CoreARInvoiceBalance] AS fact
+		INNER JOIN  #TempAcctRegCurrencybal AS temp ON fact.LegalEntityKey = temp.LegalEntityKey
+		AND SeriesReference ='CUPOA' AND (fact.AccountingCurrencyKey is null)
+
+	UPDATE fact
+	SET PlantKey = COALESCE (dim.PlantKey,'-1')
+	FROM [dbo].[CoreARInvoiceBalance] AS fact
+	LEFT JOIN  dbo.CorePlant  AS dim 
+	ON CONVERT(NVARCHAR(50),TRIM(fact.PlantCode))+'#'+CASE WHEN CONVERT(NVARCHAR(20),TRIM(fact.[DataForestID])) = '20_109' THEN '20_0009' END
+		= dim.PlantBKEY
+	WHERE COALESCE (fact.PlantKey,'-1')='-1'	AND SeriesReference ='CUPOA'
+
+	UPDATE fact
+	SET CurrencyKey = dim.CurrencyKey
+	FROM [dbo].[CoreARInvoiceBalance] AS fact
+		INNER JOIN  dbo.CoreCurrency  AS dim 
+			ON fact.CurrencyCode = dim.CurrencyCode
+	WHERE fact.CurrencyKey is null
+	AND SeriesReference ='CUPOA'
+
+-- Pass #1 with legal entity code AND customer number
+	UPDATE fact
+	SET CreditManagerKey = dim.CreditManagerKey
+	FROM [dbo].[CoreARInvoiceBalance] AS fact
+	INNER JOIN   (SELECT store.COMPANY, 
+						store.[IDENTITY], 
+						store.CREDIT_ANALYST_CODE, 
+						store.CA_DESCRIPTION
+					  , TRIM(COALESCE(store.CA_MANAGER,store.CREDIT_ANALYST_CODE)) AS CA_MANAGER
+				      , TRIM(COALESCE(store.MANAGER_DESC,store.CA_DESCRIPTION)) AS MANAGER_DESC
+				      , dm.CreditManagerKey
+					  , store.LegalEntityBKey
+					  , store.CustomerBKey
+				FROM [store].[T_20_109_1_CustomerAR] AS store
+					INNER JOIN  dbo.CoreCreditManager AS dm 
+						ON TRIM(store.CREDIT_ANALYST_CODE) = dm.CreditAnalystCode 
+						AND TRIM(store.CA_DESCRIPTION) = dm.CreditAnalystDesc
+						AND TRIM(COALESCE(store.CA_MANAGER,store.CREDIT_ANALYST_CODE)) = dm.CreditManagerCode 
+						AND TRIM(COALESCE(store.MANAGER_DESC,store.CA_DESCRIPTION))  = dm.CreditManagerDesc
+				GROUP BY store.COMPANY, store.[IDENTITY], store.CREDIT_ANALYST_CODE, store.CA_DESCRIPTION
+				, TRIM(COALESCE(store.CA_MANAGER,store.CREDIT_ANALYST_CODE))
+				, TRIM(COALESCE(store.MANAGER_DESC,store.CA_DESCRIPTION))
+				, dm.CreditManagerKey
+				, store.LegalEntityBKey
+				, store.CustomerBKey
+			)  AS dim ON fact.LegalEntityBKey = dim.LegalEntityBKey AND fact.CustomerBKey = dim.CustomerBKey
+	WHERE  fact.CreditManagerKey is null 
+	AND SeriesReference ='CUPOA'
+
+-- Pass #3 with customer number
+	UPDATE fact
+	SET CreditManagerKey = dim.CreditManagerKey
+	FROM [dbo].[CoreARInvoiceBalance] AS fact
+	INNER JOIN   (SELECT store.COMPANY, store.[IDENTITY], store.CREDIT_ANALYST_CODE, store.CA_DESCRIPTION
+				, TRIM(COALESCE(store.CA_MANAGER,store.CREDIT_ANALYST_CODE)) AS CA_MANAGER
+				, TRIM(COALESCE(store.MANAGER_DESC,store.CA_DESCRIPTION)) AS MANAGER_DESC
+				, dm.CreditManagerKey
+				, store.CustomerBKey
+				FROM [store].[T_20_109_1_CustomerAR]  AS store
+					INNER JOIN  dbo.CoreCreditManager AS dm ON TRIM(store.CREDIT_ANALYST_CODE) = dm.CreditAnalystCode AND TRIM(store.CA_DESCRIPTION) = dm.CreditAnalystDesc
+						AND TRIM(COALESCE(store.CA_MANAGER,store.CREDIT_ANALYST_CODE)) = dm.CreditManagerCode 
+						AND TRIM(COALESCE(store.MANAGER_DESC,store.CA_DESCRIPTION))  = dm.CreditManagerDesc
+				GROUP BY store.COMPANY, store.[IDENTITY], store.CREDIT_ANALYST_CODE, store.CA_DESCRIPTION
+				, TRIM(COALESCE(store.CA_MANAGER,store.CREDIT_ANALYST_CODE))
+				, TRIM(COALESCE(store.MANAGER_DESC,store.CA_DESCRIPTION))
+				, dm.CreditManagerKey
+				, store.CustomerBKey
+			)  AS dim ON fact.CustomerBKey = dim.CustomerBKey
+	WHERE fact.CreditManagerKey is null 
+	AND SeriesReference ='CUPOA'
+
+--getting END market AND segment FROM the Invoice Line table 
+	
+IF OBJECT_ID('tempdb..#TempCombinationsbal') IS NOT NULL
+DROP TABLE #TempCombinationsbal
+
+
+	SELECT  EndMarketKey, SegmentKey, InvoiceCustomerKey, InvoiceNumber,[DIM_DataForest_SKEY]
+	INTO #TempCombinationsbal
+	FROM [dbo].[vFactSalesInvoices] AS fact 
+	GROUP BY EndMarketKey, SegmentKey, InvoiceCustomerKey, InvoiceNumber,[DIM_DataForest_SKEY]
+
+	UPDATE fact
+	SET fact.EndMarketKey = COALESCE(temp.EndMarketKey,'-1'),
+	fact.SegmentKey = COALESCE(temp.SegmentKey,'-1')
+		FROM [dbo].[CoreARInvoiceBalance] AS fact
+		LEFT JOIN #TempCombinationsbal AS temp 
+		ON fact.DataForestID=temp.DIM_DataForest_SKEY
+		AND fact.CustomerKey=temp.InvoiceCustomerKey
+		WHERE  SeriesReference ='CUPOA' AND fact.EndMarketKey is null
+
+-- UPDATE exchange rates
+UPDATE fact
+SET [AccountingExchangeRate] = AcctRates.ExchangeRate
+	,[RegionalExchangeRate] = regrates.ExchangeRate
+FROM [dbo].[CoreARInvoiceBalance] AS fact 
+	INNER JOIN  [dbo].[vDimCurrency] AS dcurr ON fact.CurrencyKey = dcurr.CurrencyKey
+	INNER JOIN  [dbo].[vDimCurrency] AS regcurr ON fact.RegionalCurrencyKey = regcurr.CurrencyKey
+	INNER JOIN  [dbo].[vDimCurrency] AS acctcurr ON fact.AccountingCurrencyKey = acctcurr.CurrencyKey
+
+-- Join for Regional CURRENCY Rates
+	INNER JOIN  (SELECT * FROM dbo.GroupExchangeRates WHERE ExchangeRateType = 'Closing') AS RegRates
+		ON CASE WHEN regcurr.CurrencyCode = 'PES' THEN 'MXN'ELSE regcurr.CurrencyCode END = regrates.ToCurrencyCode 
+			AND CASE WHEN dcurr.CurrencyCode = 'PES' THEN 'MXN'ELSE dcurr.CurrencyCode END = regrates.FromCurrencyCode 
+			AND fact.SnapShotDate BETWEEN regrates.ValidFromDate AND regrates.ValidToDate
+
+
+-- Join for Accounting CURRENCY Rates
+	INNER JOIN  (SELECT * FROM dbo.GroupExchangeRates WHERE ExchangeRateType = 'Closing') AS AcctRates
+		ON CASE WHEN acctcurr.CurrencyCode = 'PES' THEN 'MXN'ELSE acctcurr.CurrencyCode END = AcctRates.ToCurrencyCode 
+			AND CASE WHEN dcurr.CurrencyCode = 'PES' THEN 'MXN'ELSE dcurr.CurrencyCode END = AcctRates.FromCurrencyCode 
+			AND fact.SnapShotDate BETWEEN AcctRates.ValidFromDate AND AcctRates.ValidToDate
+
+			WHERE  SeriesReference ='CUPOA' AND [AccountingExchangeRate] is null
+
+			EXEC stage.Process_ProcessLog_Update 
+        @BatchDescription,
+        @NewLogID
+        -- UPDATE records in table Master_ProcessLog
+
+
+END TRY
+    BEGIN CATCH -- Error Checking
+        -- IF we have an open transaction, roll it back
+           EXEC stage.Process_LogError_Insert
+           -- AND raise it to the calling process
+		   UPDATE stage.Master_ProcessLog
+			  SET BatchStatusID = 4
+			  WHERE LogID = @NewLogID
+           RAISERROR('Processing failed - See stage.Master_ErrorLog for details', 16, 1 )
+    END CATCH
